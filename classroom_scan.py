@@ -38,19 +38,12 @@ on Google's side, not an error, and oauthlib raises on the mismatch
 unless OAUTHLIB_RELAX_TOKEN_SCOPE=1 is set.
 """
 
-import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from shared import config, notion_client, timeutil
-
-# See the module docstring — oauthlib rejects Google's consolidated
-# scope name without this, and it must be set before the token refresh.
-os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+from shared import classmap, config, googleauth, notion_client, timeutil
 
 CLASSROOM_SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
@@ -59,6 +52,11 @@ CLASSROOM_SCOPES = [
 
 DEFAULT_LOOKBACK_HOURS = 48.0
 MAX_NEW_PER_RUN = 25
+
+# Submission states that mean Peter has already handed the work in.
+# RECLAIMED_BY_STUDENT is deliberately absent: he pulled it back, so it's
+# outstanding again and he should still be reminded.
+SUBMITTED_STATES = {"TURNED_IN", "RETURNED"}
 
 
 def _lookback_hours() -> float:
@@ -72,15 +70,7 @@ def _lookback_hours() -> float:
 
 
 def _classroom_service():
-    creds = Credentials(
-        token=None,
-        refresh_token=config.require("GOOGLE_REFRESH_TOKEN"),
-        client_id=config.require("GOOGLE_CLIENT_ID"),
-        client_secret=config.require("GOOGLE_CLIENT_SECRET"),
-        token_uri="https://oauth2.googleapis.com/token",
-        scopes=CLASSROOM_SCOPES,
-    )
-    return build("classroom", "v1", credentials=creds, cache_discovery=False)
+    return googleauth.service("classroom", "v1", CLASSROOM_SCOPES)
 
 
 def _raise_if_insufficient_scope(e: HttpError):
@@ -155,6 +145,54 @@ def _recent_coursework(service, course_id: str) -> list[dict]:
             return items
 
 
+def _submitted_coursework_ids(service, course_id: str) -> set[str]:
+    """
+    Coursework IDs in this course that Peter has already turned in.
+
+    `courseWorkStates=["PUBLISHED"]` means "the teacher posted it", NOT
+    "Peter still owes it" — so without this, work submitted last week
+    gets imported as a fresh to-do the moment a teacher edits it.
+
+    `courseWorkId="-"` is Classroom's wildcard: one call returns every
+    submission for the course, rather than one call per assignment.
+
+    A failure here is not fatal. Importing an already-submitted item is
+    an annoyance; skipping the whole course because a secondary call
+    failed would hide real homework.
+    """
+    submitted: set[str] = set()
+    page_token = None
+    while True:
+        try:
+            resp = (
+                service.courses()
+                .courseWork()
+                .studentSubmissions()
+                .list(
+                    courseId=course_id,
+                    courseWorkId="-",
+                    userId="me",
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+        except HttpError as e:
+            print(
+                f"[classroom_scan] could not read submission state for course "
+                f"{course_id} ({e.resp.status}); importing without it",
+                file=sys.stderr,
+            )
+            return submitted
+
+        for submission in resp.get("studentSubmissions", []):
+            if submission.get("state") in SUBMITTED_STATES:
+                submitted.add(submission["courseWorkId"])
+
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            return submitted
+
+
 def _due_date_iso(coursework: dict) -> str | None:
     """
     Classroom splits the deadline into a Date and a TimeOfDay, and the
@@ -197,15 +235,45 @@ def run(known_ids: set[str] | None = None):
         print("[classroom_scan] no active courses on this Google account")
         return
 
-    added = skipped = 0
+    # Read once: Notion invents any select option it's handed, so course
+    # names are matched against what already exists rather than sent raw.
+    class_options = notion_client.select_option_names("Class")
+
+    added = skipped = submitted = unmatched = 0
+    capped = False
+
     for course in courses:
+        if capped:
+            break
         course_id = course["id"]
-        for work in _recent_coursework(service, course_id):
+        coursework = _recent_coursework(service, course_id)
+        if not coursework:
+            continue
+
+        already_submitted = _submitted_coursework_ids(service, course_id)
+        class_name = classmap.resolve(course.get("name"), class_options)
+        if course.get("name") and class_name is None:
+            unmatched += 1
+            print(
+                f"[classroom_scan] no Notion Class option matches "
+                f"{course.get('name')!r} — importing with Class left blank. "
+                f"Add the option in Notion, or set CLASS_ALIASES.",
+                file=sys.stderr,
+            )
+
+        for work in coursework:
             external_id = f"classroom:{course_id}:{work['id']}"
             if external_id in known_ids:
                 skipped += 1
                 continue
+            if work["id"] in already_submitted:
+                submitted += 1
+                continue
             if added >= MAX_NEW_PER_RUN:
+                # Breaks out of BOTH loops — a bare `break` here only
+                # ended this course's loop, so the warning reprinted once
+                # per remaining course.
+                capped = True
                 print(
                     f"[classroom_scan] hit the {MAX_NEW_PER_RUN}-item cap for this run; "
                     "remaining items will import on the next pass",
@@ -215,7 +283,7 @@ def run(known_ids: set[str] | None = None):
 
             notion_client.create_item(
                 name=work["title"],
-                class_name=course.get("name"),
+                class_name=class_name,
                 due_date=_due_date_iso(work),
                 source="Classroom",
                 type_name="Assignments",
@@ -224,8 +292,12 @@ def run(known_ids: set[str] | None = None):
             known_ids.add(external_id)
             added += 1
 
-    if added or skipped:
-        print(f"[classroom_scan] added {added} item(s), skipped {skipped} already captured")
+    if added or skipped or submitted:
+        print(
+            f"[classroom_scan] added {added}, skipped {skipped} already captured, "
+            f"{submitted} already turned in"
+            + (f", {unmatched} course(s) with no Class match" if unmatched else "")
+        )
 
 
 if __name__ == "__main__":

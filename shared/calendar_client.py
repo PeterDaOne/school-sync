@@ -10,13 +10,9 @@ Auth: a refresh token obtained once via Google's OAuth consent flow (see
 README). No service account, no interactive step at runtime.
 """
 
-import os
 from datetime import datetime, timedelta
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-
-from . import config, state
+from . import config, googleauth, state
 
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
@@ -47,15 +43,7 @@ def _service():
     """
     global _service_cache
     if _service_cache is None:
-        creds = Credentials(
-            token=None,
-            refresh_token=config.require("GOOGLE_REFRESH_TOKEN"),
-            client_id=config.require("GOOGLE_CLIENT_ID"),
-            client_secret=config.require("GOOGLE_CLIENT_SECRET"),
-            token_uri="https://oauth2.googleapis.com/token",
-            scopes=CALENDAR_SCOPES,
-        )
-        _service_cache = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        _service_cache = googleauth.service("calendar", "v3", CALENDAR_SCOPES)
     return _service_cache
 
 

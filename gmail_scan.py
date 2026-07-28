@@ -9,43 +9,66 @@ name prefixed "[unconfirmed]" — Peter glances at it in his daily check
 and confirms or corrects it. A false positive costs five seconds of
 review; a silent auto-add that's wrong costs a missed deadline.
 
-DEDUP
------
-This re-scans a trailing 24-hour window on every run, and cloud_sync
-runs every 30 minutes — so without dedup the same email would be
-recreated as a new Notion item on ~48 consecutive runs. Each item now
-carries External ID = "gmail:<message_id>", and the caller passes in
-the set of IDs already present in Notion. Notion holds that state
-because GitHub's runners are ephemeral and share nothing between runs.
+TWO KINDS OF DEDUP, AND WHY BOTH ARE NEEDED
+-------------------------------------------
+The External ID (`gmail:<message_id>`) stops an email that BECAME a
+Notion item from becoming a second one. But it says nothing about
+emails Claude *rejected* — those write nothing to Notion, so there is
+no External ID to find them by, and they were re-classified on every
+single run for as long as they stayed inside the search window. At a
+5-minute cron that is 288 Claude calls per junk email per day. A
+handful of stuck emails would quietly cost tens of dollars a month to
+keep answering the same question with the same "no".
 
-Dedup is at message granularity, not thread: each email is reviewed
-once. Two emails about the same assignment produce two unconfirmed
-items, which is the correct failure direction — a duplicate to dismiss
-beats a silently dropped deadline.
+So every message this script *looks at* gets a Gmail label
+("school-sync/seen"), and the search excludes labelled mail. Each email
+costs exactly one classification, ever, whatever the verdict.
 
-Uses one lightweight Claude call per candidate email — not a full agent
-session — just "does this look like an assignment, and if so what's the
-class and due date." Sonnet rather than Opus: this is a cheap
-classification on two short strings, and it runs once per candidate
-email, so the cost difference is the whole ballgame.
+Labelling needs the `gmail.modify` scope. If the refresh token predates
+that scope the label call 403s; rather than fail, the scan falls back to
+a much narrower time window so the repeat cost stays bounded, and says
+so in the log. MAX_CLASSIFICATIONS_PER_RUN is a hard backstop under
+both paths.
+
+Sonnet rather than Opus: this is a cheap yes/no on two short strings,
+run once per candidate email, so cost per call is the whole ballgame.
 """
 
+import json
 import sys
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-from shared import config, notion_client
+from shared import classmap, config, googleauth, notion_client
 
-GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+# gmail.modify is required to apply the "seen" label. It is a broader
+# scope than readonly, so it is requested deliberately and used for
+# exactly one thing: adding a label to messages this script has already
+# classified. Nothing here reads, sends, or deletes mail.
+GMAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
+]
+
+SEEN_LABEL = "school-sync/seen"
 
 MODEL = "claude-sonnet-5"
 MAX_TOKENS = 1000
 MAX_MESSAGES_PER_RUN = 20
 
+# Hard ceiling on Claude calls per run, independent of the label logic.
+# If dedup ever breaks again, this caps the damage at a knowable number
+# instead of letting it scale with the cron frequency.
+MAX_CLASSIFICATIONS_PER_RUN = 10
+
+# With labelling, a wide window is free — a message is only ever looked
+# at once. Without it, every run re-examines everything in the window,
+# so the window itself is the only cost control left.
+LOOKBACK_WITH_LABEL = "newer_than:1d"
+LOOKBACK_WITHOUT_LABEL = "newer_than:2h"
+
 # Structured outputs guarantee the response parses — no markdown fences
-# to strip, no malformed JSON to catch. The old code asked for JSON in
-# the prompt and hoped; this makes it the API's problem.
+# to strip, no malformed JSON to catch.
 ASSIGNMENT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -72,33 +95,79 @@ ASSIGNMENT_SCHEMA = {
 
 
 def _gmail_service():
-    creds = Credentials(
-        token=None,
-        refresh_token=config.require("GOOGLE_REFRESH_TOKEN"),
-        client_id=config.require("GOOGLE_CLIENT_ID"),
-        client_secret=config.require("GOOGLE_CLIENT_SECRET"),
-        token_uri="https://oauth2.googleapis.com/token",
-        scopes=GMAIL_SCOPES,
-    )
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    return googleauth.service("gmail", "v1", GMAIL_SCOPES)
 
 
-def _candidate_query() -> str:
+def _seen_label_id(service) -> str | None:
+    """
+    Find or create the "already looked at" label. Returns None if the
+    refresh token doesn't carry gmail.modify, which is a degraded but
+    working state, not a failure.
+    """
+    try:
+        labels = service.users().labels().list(userId="me").execute().get("labels", [])
+        for label in labels:
+            if label["name"] == SEEN_LABEL:
+                return label["id"]
+        created = (
+            service.users()
+            .labels()
+            .create(
+                userId="me",
+                body={
+                    "name": SEEN_LABEL,
+                    # Hidden in the Gmail UI — this is bookkeeping, and
+                    # Peter shouldn't have to look at it.
+                    "labelListVisibility": "labelHide",
+                    "messageListVisibility": "hide",
+                },
+            )
+            .execute()
+        )
+        return created["id"]
+    except HttpError as e:
+        if e.resp.status in (401, 403):
+            print(
+                "[gmail_scan] cannot label messages (needs the gmail.modify "
+                "scope). Falling back to a 2-hour window so rejected emails "
+                "aren't re-classified all day. Re-run the OAuth consent flow "
+                "from the README to fix this properly.",
+                file=sys.stderr,
+            )
+            return None
+        raise
+
+
+def _candidate_query(has_label: bool) -> str:
     """
     Cheap pre-filter before spending a Claude call on anything. Domain
     and keyword filters are ANDed: a candidate must come from a school
-    domain AND look assignment-shaped. Tune the keyword list once real
-    teacher emails are flowing.
+    domain AND look assignment-shaped.
     """
     hints = [h.strip() for h in config.optional("SCHOOL_EMAIL_HINTS").split(",") if h.strip()]
     keywords = (
         "subject:assignment OR subject:due OR subject:homework OR "
         "subject:project OR subject:essay OR subject:quiz OR subject:test"
     )
-    parts = [f"({keywords})", "newer_than:1d"]
+    parts = [f"({keywords})", LOOKBACK_WITH_LABEL if has_label else LOOKBACK_WITHOUT_LABEL]
     if hints:
         parts.insert(0, "(" + " OR ".join(f"from:{h}" for h in hints) + ")")
+    if has_label:
+        parts.append(f'-label:"{SEEN_LABEL}"')
     return " ".join(parts)
+
+
+def _mark_seen(service, message_id: str, label_id: str | None):
+    if not label_id:
+        return
+    try:
+        service.users().messages().modify(
+            userId="me", id=message_id, body={"addLabelIds": [label_id]}
+        ).execute()
+    except HttpError as e:
+        # Worst case this message gets classified again next run — a few
+        # cents, not a broken sync.
+        print(f"[gmail_scan] could not label {message_id}: {e}", file=sys.stderr)
 
 
 def _extract_assignment(client, subject: str, snippet: str) -> dict | None:
@@ -118,8 +187,6 @@ def _extract_assignment(client, subject: str, snippet: str) -> dict | None:
     if resp.stop_reason == "refusal":
         print(f"[gmail_scan] classification refused for {subject!r}", file=sys.stderr)
         return None
-
-    import json
 
     text = next((b.text for b in resp.content if b.type == "text"), None)
     if not text:
@@ -151,21 +218,31 @@ def run(known_ids: set[str] | None = None):
 
     client = anthropic.Anthropic(api_key=api_key)
     service = _gmail_service()
+    label_id = _seen_label_id(service)
 
     results = (
         service.users()
         .messages()
-        .list(userId="me", q=_candidate_query(), maxResults=MAX_MESSAGES_PER_RUN)
+        .list(userId="me", q=_candidate_query(bool(label_id)), maxResults=MAX_MESSAGES_PER_RUN)
         .execute()
     )
     messages = results.get("messages", [])
 
-    added = skipped = 0
+    class_options = notion_client.select_option_names("Class")
+    added = skipped = classified = 0
+
     for msg_ref in messages:
         external_id = f"gmail:{msg_ref['id']}"
         if external_id in known_ids:
             skipped += 1
             continue
+        if classified >= MAX_CLASSIFICATIONS_PER_RUN:
+            print(
+                f"[gmail_scan] hit the {MAX_CLASSIFICATIONS_PER_RUN}-classification cap; "
+                "the rest will be looked at next run",
+                file=sys.stderr,
+            )
+            break
 
         msg = (
             service.users()
@@ -175,12 +252,21 @@ def run(known_ids: set[str] | None = None):
         )
         headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
         parsed = _extract_assignment(client, headers.get("Subject", ""), msg.get("snippet", ""))
+        classified += 1
+
+        # Mark it seen whatever the verdict — a "no" is exactly the
+        # answer we must not pay to recompute.
+        _mark_seen(service, msg_ref["id"], label_id)
+
         if not parsed:
             continue
 
         notion_client.create_item(
             name=f"[unconfirmed] {parsed['task_name']}",
-            class_name=parsed.get("class_name"),
+            # Claude can invent a class name that isn't one of Peter's
+            # Notion options, and Notion would happily create it. Resolve
+            # against the real options or leave it blank.
+            class_name=classmap.resolve(parsed.get("class_name"), class_options),
             due_date=parsed.get("due_date"),
             source="Email",
             external_id=external_id,
@@ -188,8 +274,11 @@ def run(known_ids: set[str] | None = None):
         known_ids.add(external_id)  # guard against duplicates within this run
         added += 1
 
-    if added or skipped:
-        print(f"[gmail_scan] added {added} unconfirmed item(s), skipped {skipped} already captured")
+    if added or skipped or classified:
+        print(
+            f"[gmail_scan] classified {classified}, added {added} unconfirmed item(s), "
+            f"skipped {skipped} already captured"
+        )
 
 
 if __name__ == "__main__":

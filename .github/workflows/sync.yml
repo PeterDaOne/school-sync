@@ -31,6 +31,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+      # The test cases themselves use only the standard library, but they
+      # import the real modules under test — and notion_client imports
+      # requests. Without this the whole discovery pass dies on
+      # ModuleNotFoundError before a single test runs. Installing here
+      # also proves requirements.txt is actually installable.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
       - name: Run tests
         run: python -m unittest discover -s tests -t . -v
 

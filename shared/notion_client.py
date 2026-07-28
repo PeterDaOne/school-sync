@@ -195,6 +195,29 @@ def create_item(
     )
 
 
+_select_options_cache: dict[str, list[str]] = {}
+
+
+def select_option_names(property_name: str) -> list[str]:
+    """
+    The option names currently defined for a select property.
+
+    Needed because Notion *creates* any select option you send it that
+    doesn't already exist — there's no strict mode. So the only way to
+    avoid polluting Peter's carefully-named Class list is to read the
+    real options first and refuse to send anything else.
+
+    Cached per process: the schema can't change mid-run, and this would
+    otherwise be one extra API call per captured item.
+    """
+    if property_name not in _select_options_cache:
+        db = _request("GET", f"/databases/{_database_id()}")
+        prop = db.get("properties", {}).get(property_name, {})
+        options = prop.get(prop.get("type", ""), {}).get("options", [])
+        _select_options_cache[property_name] = [o["name"] for o in options]
+    return _select_options_cache[property_name]
+
+
 def external_id_index(pages: list[dict]) -> set[str]:
     """
     Every external ID already present in the database.

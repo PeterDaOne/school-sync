@@ -71,6 +71,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', scopes=[
     'https://www.googleapis.com/auth/calendar',
     'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.modify',
     'https://www.googleapis.com/auth/classroom.courses.readonly',
     'https://www.googleapis.com/auth/classroom.coursework.me.readonly',
 ])
@@ -82,6 +83,16 @@ print('Refresh token:', flow.run_local_server(port=0).refresh_token)
 back `classroom.student-submissions.me.readonly` in place of
 `classroom.coursework.me.readonly`, and oauthlib treats that rename as
 a mismatch and raises. The refresh token doesn't expire unless revoked.
+
+**Why `gmail.modify`, when everything else is read-only?** It's used for
+exactly one thing: adding a hidden `school-sync/seen` label to messages
+the scan has already classified. Without it, an email Claude decides
+*isn't* an assignment gets re-classified on every run for as long as it
+sits in the search window — hundreds of paid API calls a day to keep
+getting the same answer. Nothing in this project reads, sends, or
+deletes mail. If the scope isn't granted the scan still works; it just
+narrows its window to keep the repeat cost bounded, and says so in the
+log.
 
 > **Using your school Google account?** Re-run this whole step signed
 > into it. Classroom returns zero courses on a personal account — auth
@@ -155,10 +166,13 @@ move, since the runners are UTC.
 python3 -m unittest discover -s tests -t .
 ```
 
-No dependencies — standard library only. They cover the reminder
-cadence engine, timezone handling, sync-state tracking, and Notion
-field extraction. They also run on every push via GitHub Actions and
-gate the scheduled sync, so a cadence bug can't reach your phone.
+The test cases use only the standard library — no pytest — but they
+import the real modules, which need `requirements.txt` installed
+(`notion_client` imports `requests`). They cover the reminder cadence
+engine, timezone handling, sync-state tracking, Notion field
+extraction, and Classroom→Notion class matching. They also run on every
+push via GitHub Actions and gate the scheduled sync, so a cadence bug
+can't reach your phone.
 
 ---
 
