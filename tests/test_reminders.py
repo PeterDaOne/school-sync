@@ -34,6 +34,7 @@ def item(**overrides) -> dict:
         "is_complete": False,
         "last_reminded": None,
         "created_time": "2026-07-01T00:00:00.000Z",
+        "external_id": None,
         "url": "https://notion.so/page-1",
     }
     base.update(overrides)
@@ -309,10 +310,56 @@ class CloudTakeoverLag(unittest.TestCase):
         self.assertIsNotNone(msg)
 
     def test_cloud_capture_waits_for_a_newly_created_page(self):
+        # Typed by hand a moment ago (no External ID) — local_sync may
+        # already be about to announce it, so the cloud holds off.
         self.assertIsNone(
             reminders.due_for_reminder(
                 item(last_reminded=None, created_time="2026-07-28T15:05:00.000Z"),
                 at("2026-07-28T09:10"),  # 15:10 UTC — page is 5 minutes old
+                cadence=CADENCE,
+                lag=self.LAG,
+            )
+        )
+
+    def test_script_captured_items_announce_immediately(self):
+        """
+        An item the Gmail/Classroom sweep just created carries an
+        External ID and must notify on the very same run. It didn't
+        exist on local_sync's last pass, so there is no race to lose —
+        and waiting a whole extra cron cycle to say "new assignment
+        posted" defeats the point of the capture sweeps.
+        """
+        msg = reminders.due_for_reminder(
+            item(
+                last_reminded=None,
+                created_time="2026-07-28T15:09:30.000Z",  # 30 seconds old
+                external_id="classroom:123:456",
+            ),
+            at("2026-07-28T09:10"),
+            cadence=CADENCE,
+            lag=self.LAG,
+        )
+        self.assertEqual(msg, "New assignment added: Algebra Work, due Aug 26.")
+
+    def test_script_captured_items_still_respect_quiet_hours(self):
+        self.assertIsNone(
+            reminders.due_for_reminder(
+                item(
+                    last_reminded=None,
+                    created_time="2026-07-28T08:00:00.000Z",
+                    external_id="gmail:abc123",
+                ),
+                at("2026-07-28T02:00"),
+                cadence=CADENCE,
+                lag=self.LAG,
+            )
+        )
+
+    def test_script_captured_items_still_respect_completion(self):
+        self.assertIsNone(
+            reminders.due_for_reminder(
+                item(last_reminded=None, external_id="gmail:abc123", is_complete=True),
+                at("2026-07-28T09:10"),
                 cadence=CADENCE,
                 lag=self.LAG,
             )

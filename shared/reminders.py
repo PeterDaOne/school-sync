@@ -67,7 +67,11 @@ DEFAULT_QUIET_END = "05:00"
 DEFAULT_INTERVAL_HOURS = 24.0
 DEFAULT_SOON_INTERVAL_HOURS = 4.0
 DEFAULT_URGENT_INTERVAL_HOURS = 2.0
-DEFAULT_CLOUD_LAG_MINUTES = 10.0
+# Lowered from 10 to 5 on 2026-07-28, alongside moving the cloud cron to
+# every 5 minutes. The lag only needs to be long enough to prove the Mac
+# is asleep, and local_sync polls every 60 seconds — five minutes is
+# still 300x that, while halving how long a cloud-fired reminder waits.
+DEFAULT_CLOUD_LAG_MINUTES = 5.0
 
 
 def _parse_hhmm(s: str, fallback: str) -> dtime:
@@ -219,12 +223,25 @@ def due_for_reminder(
     last_reminded = timeutil.parse(item["last_reminded"]) if item.get("last_reminded") else None
 
     # Capture: the first time this item has ever been seen by the
-    # reminder engine. The lag is measured from when the page was
-    # created, since there's no previous reminder to measure from.
+    # reminder engine. There's no previous reminder to measure the lag
+    # from, so it's measured from when the page was created.
     if last_reminded is None:
-        created = timeutil.parse(item["created_time"]) if item.get("created_time") else None
-        if lag and created and created > effective:
-            return None  # too new — give local_sync its chance first
+        # ...except for items the capture sweeps created themselves,
+        # which carry an External ID. Those announce immediately, no
+        # matter which runner sees them first.
+        #
+        # The lag exists so local_sync can win a race for an item the
+        # cloud might also be looking at. But local_sync cannot have
+        # seen an item that did not exist on its previous pass, so
+        # there is no race to lose — and making a Classroom assignment
+        # wait a whole extra cron cycle for its "added" notification is
+        # the opposite of what this system is for. Stamping Last
+        # Reminded right after a successful send is what actually
+        # closes the window.
+        if not item.get("external_id"):
+            created = timeutil.parse(item["created_time"]) if item.get("created_time") else None
+            if lag and created and created > effective:
+                return None  # typed by hand just now — let local_sync go first
         return f"New {label} added: {item['name']}{_due_suffix(due, has_time)}."
 
     if item.get("type_name") == "Events":

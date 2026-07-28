@@ -21,13 +21,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from shared import config, pipeline
+from shared import config, log, pipeline
 
 SOURCE = "local_sync"
 
 
 def main() -> int:
     config.load_dotenv()
+    log.install()
     try:
         report = pipeline.run_sync_pass(SOURCE, send_reminders=True)
     except Exception as e:

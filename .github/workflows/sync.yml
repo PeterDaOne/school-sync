@@ -2,11 +2,19 @@ name: School Sync
 
 on:
   schedule:
-    # Every 30 minutes. The repo must be PUBLIC for this to run on
-    # unlimited free minutes. Secrets stay encrypted and hidden either
-    # way — but everything NOT in .gitignore is world-readable, so check
-    # `git status` before the first push.
-    - cron: "*/30 * * * *"
+    # Every 5 minutes — GitHub's minimum interval. This is the dominant
+    # latency for "new assignment added" notifications when the Mac is
+    # closed, so it's worth running at the floor.
+    #
+    # Offset to 2,7,12,... rather than 0,5,10,... on purpose: GitHub
+    # delays scheduled workflows under load, and the top of the hour is
+    # the worst moment to ask for a runner. Expect 5-15 minutes in
+    # practice — scheduled runs are best-effort, not guaranteed on time.
+    #
+    # The repo must be PUBLIC for this to run on unlimited free minutes.
+    # Secrets stay encrypted either way, but everything NOT in
+    # .gitignore is world-readable — check `git status` before pushing.
+    - cron: "2-59/5 * * * *"
   push:
     branches: [main]
   pull_request:
@@ -68,6 +76,6 @@ jobs:
           REMINDER_INTERVAL_HOURS_SOON: ${{ vars.REMINDER_INTERVAL_HOURS_SOON || '4' }}
           REMINDER_INTERVAL_HOURS_URGENT: ${{ vars.REMINDER_INTERVAL_HOURS_URGENT || '2' }}
           CLOUD_REMINDERS: ${{ vars.CLOUD_REMINDERS || 'true' }}
-          CLOUD_REMINDER_LAG_MINUTES: ${{ vars.CLOUD_REMINDER_LAG_MINUTES || '10' }}
+          CLOUD_REMINDER_LAG_MINUTES: ${{ vars.CLOUD_REMINDER_LAG_MINUTES || '5' }}
           CLASSROOM_LOOKBACK_HOURS: ${{ vars.CLASSROOM_LOOKBACK_HOURS || '48' }}
         run: python cloud_sync.py

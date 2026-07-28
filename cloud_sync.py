@@ -38,7 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from shared import config, notion_client, pipeline, reminders
+from shared import config, log, notion_client, pipeline, reminders
 
 import classroom_scan
 import gmail_scan
@@ -59,6 +59,7 @@ def _run_phase(name: str, fn, *args, **kwargs) -> str | None:
 
 def main() -> int:
     config.load_dotenv()
+    log.install()
     failures: list[str] = []
 
     # Self-heal the dedup property if Peter renamed or deleted it in the
