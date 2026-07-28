@@ -1,0 +1,19 @@
+# Upper bounds are deliberate. Peter's Mac installs these once and keeps
+# them; GitHub Actions reinstalls from scratch on every run. With bare
+# `>=` the two silently drift apart over months until a major release
+# changes an API and only the cloud half breaks — at 3am, with no one
+# watching. Capping below the next major keeps both sides on the same
+# generation while still picking up patch and minor fixes.
+#
+# Versions verified working together on 2026-07-28 are noted alongside.
+# To move to a new major: raise the cap, run `python3 -m unittest
+# discover -s tests -t .`, then run local_sync.py once by hand.
+
+requests>=2.31.0,<3.0.0                   # 2.34.2
+google-api-python-client>=2.100.0,<3.0.0  # 2.198.0
+google-auth>=2.23.0,<3.0.0                # 2.56.2
+google-auth-oauthlib>=1.2.0,<2.0.0        # 1.4.0
+anthropic>=0.40.0,<1.0.0                  # 0.120.0
+
+# Tests use the standard library's unittest — nothing to install.
+# Run them with: python3 -m unittest discover -s tests -t .

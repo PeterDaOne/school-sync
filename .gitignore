@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------
+# SECRETS — never commit these. This repo is intended to be PUBLIC (see
+# README: public repos get unlimited free GitHub Actions minutes), so
+# anything listed here would be world-readable the moment it was pushed.
+#
+# If you ever add a new file that holds a credential, add it HERE FIRST,
+# before the file exists. Once a secret is in a pushed commit, deleting
+# it later does not remove it — the old commit is still on GitHub, and
+# the credential must be rotated, not just deleted.
+# ---------------------------------------------------------------------
+
+# Real environment values. .env.example (placeholders only) IS committed.
+.env
+.env.*
+!.env.example
+
+# Google OAuth client credentials + any cached token from the consent flow.
+client_secret*.json
+token.json
+*credentials*.json
+
+# The generated launchd plist bakes every secret from .env into its XML.
+# generate_plist.py now writes straight to ~/Library/LaunchAgents/, but
+# this stays as a backstop in case an older copy is ever regenerated here.
+*.plist
+
+# Logs — tracebacks can echo request URLs, headers, and payloads.
+*.log
+
+# ---------------------------------------------------------------------
+# Noise
+# ---------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.DS_Store

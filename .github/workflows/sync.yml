@@ -1,0 +1,73 @@
+name: School Sync
+
+on:
+  schedule:
+    # Every 30 minutes. The repo must be PUBLIC for this to run on
+    # unlimited free minutes. Secrets stay encrypted and hidden either
+    # way — but everything NOT in .gitignore is world-readable, so check
+    # `git status` before the first push.
+    - cron: "*/30 * * * *"
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {} # lets you trigger it manually from the Actions tab
+
+jobs:
+  # Tests are pure logic with no secrets, so they run on every push and
+  # PR as well as on the schedule — and they gate the sync below, so a
+  # cadence bug can't reach Peter's phone from a scheduled run.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run tests
+        run: python -m unittest discover -s tests -t . -v
+
+  sync:
+    needs: test
+    # Don't touch live Notion data from a pull request.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run cloud sync
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SCHOOL_EMAIL_HINTS: ${{ secrets.SCHOOL_EMAIL_HINTS }}
+          # Required now that cloud_sync fires reminders too. Without
+          # NTFY_TOPIC the run fails fast rather than syncing silently
+          # with notifications disabled.
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          # Reminder behavior must match the Mac exactly, or the two
+          # schedulers disagree about when it's night. SCHOOL_TIMEZONE
+          # is the important one: these runners are UTC.
+          SCHOOL_TIMEZONE: ${{ vars.SCHOOL_TIMEZONE || 'America/Denver' }}
+          GOOGLE_CALENDAR_TIMEZONE: ${{ vars.GOOGLE_CALENDAR_TIMEZONE || 'America/Denver' }}
+          QUIET_HOURS_START: ${{ vars.QUIET_HOURS_START || '00:00' }}
+          QUIET_HOURS_END: ${{ vars.QUIET_HOURS_END || '05:00' }}
+          REMINDER_INTERVAL_HOURS: ${{ vars.REMINDER_INTERVAL_HOURS || '24' }}
+          REMINDER_INTERVAL_HOURS_SOON: ${{ vars.REMINDER_INTERVAL_HOURS_SOON || '4' }}
+          REMINDER_INTERVAL_HOURS_URGENT: ${{ vars.REMINDER_INTERVAL_HOURS_URGENT || '2' }}
+          CLOUD_REMINDERS: ${{ vars.CLOUD_REMINDERS || 'true' }}
+          CLOUD_REMINDER_LAG_MINUTES: ${{ vars.CLOUD_REMINDER_LAG_MINUTES || '10' }}
+          CLASSROOM_LOOKBACK_HOURS: ${{ vars.CLASSROOM_LOOKBACK_HOURS || '48' }}
+        run: python cloud_sync.py
