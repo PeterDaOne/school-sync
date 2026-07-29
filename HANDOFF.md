@@ -46,11 +46,13 @@ now the largest untested surface in the project.
 The secrets are in and the cloud path works. Two things are worth
 knowing before picking anything up:
 
-1. **The `2-59/5` cron does not fire every 5 minutes.** Measured over
-   ~25h of live history: ~110 min average gap, 204 min worst. GitHub
-   deprioritizes sub-hourly schedules on public repos. Worst-case
-   reminder latency with the Mac shut is a few hours. CLAUDE.md has the
-   numbers; earlier claims of a 5-minute cadence were never measured.
+1. **GitHub's `cron:` is throttled to ~110 min on public repos** (204
+   worst, measured). Fixed 2026-07-29: a cron-job.org job POSTs to the
+   workflow_dispatch API every 5 min, which is NOT throttled. Measured
+   live at 296s between runs, 39s dispatch→sync-complete. The built-in
+   cron stays on as a fallback, and the sync job's `concurrency` block
+   is what keeps the two from overlapping — don't remove it. The PAT
+   expires ~2026-10-27 and fails silently; latency just degrades.
 2. **A failed push used to produce a green run — fixed 2026-07-29.**
    Report.notify_failures now reaches the exit code, so a dropped push
    turns the run red. Verified by reproducing the original failure
