@@ -95,6 +95,11 @@ def main() -> int:
             send_reminders=send,
             lag=reminders.cloud_lag(),
             recheck_before_send=True,
+            # Wider than local_sync's default 2m -- cloud passes are
+            # further apart, so this needs enough margin to not miss a
+            # mark-done command posted between passes. Reprocessing
+            # overlap is harmless (see shared/commands.py).
+            command_window="10m",
         )
         exit_code = pipeline.finish(report, SOURCE)
     except Exception as e:

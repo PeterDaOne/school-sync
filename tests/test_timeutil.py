@@ -66,5 +66,57 @@ class Helpers(unittest.TestCase):
                 os.environ["SCHOOL_TIMEZONE"] = original
 
 
+class CalendarDaysBetween(unittest.TestCase):
+    """
+    Added 2026-07-29 for the reminder-cadence rewrite (relative wording
+    like "due tomorrow", and the Events 3-day/1-day/morning-of schedule).
+    This is the same class of bug the codebase has shipped twice before:
+    treating "a day" as 24 elapsed hours instead of a calendar boundary
+    in Peter's timezone. The boundary case below is the one that catches
+    it — a 24h-bucket comparison gets it wrong, calendar-day math doesn't.
+    """
+
+    def test_same_calendar_day_is_zero(self):
+        self.assertEqual(
+            timeutil.calendar_days_between(
+                timeutil.parse("2026-07-28T23:00:00-06:00"),
+                timeutil.parse("2026-07-28T01:00:00-06:00"),
+            ),
+            0,
+        )
+
+    def test_evening_now_against_early_morning_next_day_is_one(self):
+        # Only two hours apart in elapsed time, but a full calendar day.
+        later = timeutil.parse("2026-07-29T01:00:00-06:00")
+        earlier = timeutil.parse("2026-07-28T23:00:00-06:00")
+        self.assertEqual(timeutil.calendar_days_between(later, earlier), 1)
+
+    def test_early_morning_against_previous_evening_is_negative_one(self):
+        # The reverse direction of the case above.
+        later = timeutil.parse("2026-07-28T23:00:00-06:00")
+        earlier = timeutil.parse("2026-07-29T01:00:00-06:00")
+        self.assertEqual(timeutil.calendar_days_between(later, earlier), -1)
+
+    def test_multi_day_gap(self):
+        self.assertEqual(
+            timeutil.calendar_days_between(
+                timeutil.parse("2026-08-05T12:00:00-06:00"),
+                timeutil.parse("2026-07-28T12:00:00-06:00"),
+            ),
+            8,
+        )
+
+    def test_crosses_a_dst_transition_without_drifting(self):
+        # 2026-03-08 is when Mountain time springs forward -- a naive
+        # elapsed-hours calculation would get a 23-hour "day" wrong here.
+        self.assertEqual(
+            timeutil.calendar_days_between(
+                timeutil.parse("2026-03-09T09:00:00-06:00"),
+                timeutil.parse("2026-03-07T09:00:00-07:00"),
+            ),
+            2,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

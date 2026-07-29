@@ -121,5 +121,27 @@ class Aliases(unittest.TestCase):
         self.assertEqual(classmap.resolve("AP Stats", OPTIONS), "AP Stats")
 
 
+class ClassEmoji(unittest.TestCase):
+    def test_every_live_option_has_an_emoji(self):
+        """
+        Every canonical name Resolve can return should have an emoji, or
+        a notification silently loses its visual identifier for that
+        class with no error anywhere.
+        """
+        for option in OPTIONS:
+            self.assertNotEqual(classmap.class_emoji(option), "", option)
+
+    def test_unknown_class_returns_empty_not_a_placeholder(self):
+        self.assertEqual(classmap.class_emoji("Marching Band"), "")
+
+    def test_none_returns_empty(self):
+        self.assertEqual(classmap.class_emoji(None), "")
+
+    def test_misspelled_live_option_still_resolves(self):
+        # The dict is keyed by the LIVE (misspelled) Notion option name
+        # on purpose -- resolve() would hand this exact string back.
+        self.assertEqual(classmap.class_emoji("AP Psycology"), "🧠")
+
+
 if __name__ == "__main__":
     unittest.main()

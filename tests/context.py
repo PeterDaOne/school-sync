@@ -28,6 +28,11 @@ os.environ["SCHOOL_TIMEZONE"] = "America/Denver"
 os.environ.setdefault("NOTION_TOKEN", "test-token")
 os.environ.setdefault("NOTION_DB_ID", "test-db")
 os.environ.setdefault("NTFY_TOPIC", "test-topic")
+# Explicitly blank, not just left unset: a real NTFY_COMMAND_TOPIC in
+# .env would otherwise leak in and make shared/commands.py hit the live
+# ntfy network during a test run -- config.optional's setdefault-based
+# .env loading only skips a key that's already present in os.environ.
+os.environ.setdefault("NTFY_COMMAND_TOPIC", "")
 
 from shared import timeutil  # noqa: E402
 

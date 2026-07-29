@@ -18,7 +18,7 @@ from unittest import mock
 
 import tests.context  # noqa: F401  (path + timezone setup)
 
-from shared import pipeline
+from shared import pipeline, reminders
 
 
 class ReportSummary(unittest.TestCase):
@@ -64,13 +64,23 @@ ITEM = {
 }
 
 
+REMINDER = reminders.Reminder(title="Assignment overdue", body="Essay — was due yesterday")
+
+
 class RunSyncPassNotifyWiring(unittest.TestCase):
     """
     Drives run_sync_pass with every collaborator stubbed, so the only
     thing under test is what the pass does with notify()'s return value.
+
+    commands.poll_mark_done/apply_mark_done are deliberately NOT mocked
+    here — they run for real, and since NTFY_COMMAND_TOPIC is blanked in
+    tests/context.py, poll_mark_done no-ops immediately with no network
+    call. That's worth relying on rather than mocking: it's the same
+    "unconfigured is a no-op, not an error" path production hits until
+    Peter sets the topic up.
     """
 
-    def _run(self, notify_result: bool):
+    def _run(self, notify_result: bool, reminder=None, max_per_pass: int = 3):
         page = {"id": "page-1"}
         with (
             mock.patch.object(pipeline, "notion_client") as nc,
@@ -82,8 +92,9 @@ class RunSyncPassNotifyWiring(unittest.TestCase):
             nc.get_all_items.return_value = [page]
             nc.extract_fields.return_value = dict(ITEM)
             st.needs_sync.return_value = False
-            rm.Cadence.from_env.return_value = object()
-            rm.due_for_reminder.return_value = "Overdue: Essay"
+            cadence = mock.Mock(max_per_pass=max_per_pass)
+            rm.Cadence.from_env.return_value = cadence
+            rm.due_for_reminder.return_value = reminder or REMINDER
             report = pipeline.run_sync_pass(
                 "test", send_reminders=True, lag=timedelta(0)
             )
@@ -110,6 +121,33 @@ class RunSyncPassNotifyWiring(unittest.TestCase):
         nc.mark_reminded.assert_called_once()
         self.assertEqual(report.reminded, 1)
         self.assertEqual(report.notify_failures, 0)
+        self.assertTrue(report.ok)
+
+    def test_notify_receives_reminder_fields_not_a_raw_string(self):
+        """
+        due_for_reminder returns a Reminder object now, not a str --
+        pipeline must unpack .title/.body/.priority/.tags into notify(),
+        not pass the object straight through.
+        """
+        report, _, notify_fn = self._run(notify_result=True)
+        _, kwargs = notify_fn.call_args
+        args = notify_fn.call_args.args
+        self.assertEqual(args[0], REMINDER.title)
+        self.assertEqual(args[1], REMINDER.body)
+        self.assertEqual(kwargs.get("priority"), REMINDER.priority)
+        self.assertEqual(kwargs.get("tags"), REMINDER.tags)
+
+    def test_per_pass_cap_defers_without_touching_last_reminded(self):
+        """
+        With max_per_pass=0, every due reminder is deferred, not sent --
+        notify() is never even called, and nothing is lost (no stamp).
+        """
+        report, nc, notify_fn = self._run(notify_result=True, max_per_pass=0)
+        notify_fn.assert_not_called()
+        nc.mark_reminded.assert_not_called()
+        self.assertEqual(report.deferred, 1)
+        self.assertEqual(report.reminded, 0)
+        # Deferred is routine, not a failure -- must not affect exit code.
         self.assertTrue(report.ok)
 
 

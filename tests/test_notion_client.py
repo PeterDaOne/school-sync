@@ -11,6 +11,7 @@ curl against the Notion REST API.
 """
 
 import unittest
+from unittest import mock
 
 import tests.context  # noqa: F401
 
@@ -22,6 +23,7 @@ def page(**overrides) -> dict:
         "Title": {"title": [{"plain_text": "Algebra "}, {"plain_text": "Work"}]},
         "Type": {"select": {"name": "Assignments"}},
         "Class": {"select": {"name": "AP Stats"}},
+        "Priority": {"select": {"name": "High"}},
         "Status": {"status": {"name": "Not Started"}},
         "Input Type": {"select": {"name": "Classroom"}},
         "Due Date": {"date": {"start": "2026-08-26"}},
@@ -95,6 +97,32 @@ class ExtractFields(unittest.TestCase):
     def test_url_is_carried_through_for_the_notification_click_target(self):
         self.assertEqual(
             notion_client.extract_fields(page())["url"], "https://notion.so/page-1"
+        )
+
+    def test_priority_is_read(self):
+        self.assertEqual(notion_client.extract_fields(page())["priority"], "High")
+
+    def test_missing_priority_is_none_not_a_guessed_default(self):
+        # extract_fields stays a faithful read of Notion -- defaulting an
+        # unset Priority to Medium is shared/reminders.py's job, not this
+        # module's, so this must come back as None, not "Medium".
+        fields = notion_client.extract_fields(page(properties={"Priority": {"select": None}}))
+        self.assertIsNone(fields["priority"])
+
+
+class MarkDone(unittest.TestCase):
+    """
+    No network: patches _request the same way the rest of this test
+    suite avoids hitting Notion, verifying only the request shape.
+    """
+
+    def test_patches_status_to_done(self):
+        with mock.patch.object(notion_client, "_request") as request:
+            notion_client.mark_done("page-1")
+        request.assert_called_once_with(
+            "PATCH",
+            "/pages/page-1",
+            json={"properties": {"Status": {"status": {"name": "Done"}}}},
         )
 
 

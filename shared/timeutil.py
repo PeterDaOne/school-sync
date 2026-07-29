@@ -80,3 +80,17 @@ def has_time_component(value: str) -> bool:
 def end_of_day(dt: datetime) -> datetime:
     """23:59 on the same calendar day, preserving timezone."""
     return dt.replace(hour=23, minute=59, second=0, microsecond=0)
+
+
+def calendar_days_between(later: datetime, earlier: datetime) -> int:
+    """
+    Whole calendar days between two moments, in the school timezone.
+
+    Not a 24-hour bucket: 11pm today to 1am tomorrow is 1 calendar day
+    apart even though only two hours have passed. Reminder wording
+    ("due tomorrow", event "3 days before") needs the calendar-day
+    answer, not the elapsed-time one, or it drifts by a day depending on
+    what time of day `now` happens to be.
+    """
+    tz = school_tz()
+    return (later.astimezone(tz).date() - earlier.astimezone(tz).date()).days

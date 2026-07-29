@@ -137,6 +137,19 @@ def mark_reminded(page_id: str, timestamp_iso: str):
     )
 
 
+def mark_done(page_id: str):
+    """
+    Set Status to Done. Used by the mark-done notification button (see
+    shared/commands.py) — setting it twice is harmless, so callers don't
+    need to check current state first.
+    """
+    _request(
+        "PATCH",
+        f"/pages/{page_id}",
+        json={"properties": {"Status": {"status": {"name": "Done"}}}},
+    )
+
+
 def get_last_reminded(page_id: str) -> str | None:
     """
     Re-read just this page's Last Reminded. Used by cloud_sync as a
@@ -264,6 +277,7 @@ def extract_fields(page: dict) -> dict:
         "name": _title(props.get("Title")),
         "class_name": _select(props.get("Class")),
         "type_name": _select(props.get("Type")),
+        "priority": _select(props.get("Priority")),
         "due_date": _date(props.get("Due Date")),
         "status": status,
         "is_complete": status in COMPLETE_STATUSES,

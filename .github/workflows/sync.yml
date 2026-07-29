@@ -90,6 +90,11 @@ jobs:
           # with notifications disabled.
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          # Optional -- powers the "Mark done" notification button. A
+          # SECOND, different topic from NTFY_TOPIC. If unset here, the
+          # button is simply absent from every notification; nothing
+          # else breaks. See README "Mark done".
+          NTFY_COMMAND_TOPIC: ${{ secrets.NTFY_COMMAND_TOPIC }}
           # Reminder behavior must match the Mac exactly, or the two
           # schedulers disagree about when it's night. SCHOOL_TIMEZONE
           # is the important one: these runners are UTC.
@@ -97,9 +102,21 @@ jobs:
           GOOGLE_CALENDAR_TIMEZONE: ${{ vars.GOOGLE_CALENDAR_TIMEZONE || 'America/Denver' }}
           QUIET_HOURS_START: ${{ vars.QUIET_HOURS_START || '00:00' }}
           QUIET_HOURS_END: ${{ vars.QUIET_HOURS_END || '05:00' }}
-          REMINDER_INTERVAL_HOURS: ${{ vars.REMINDER_INTERVAL_HOURS || '24' }}
-          REMINDER_INTERVAL_HOURS_SOON: ${{ vars.REMINDER_INTERVAL_HOURS_SOON || '4' }}
-          REMINDER_INTERVAL_HOURS_URGENT: ${{ vars.REMINDER_INTERVAL_HOURS_URGENT || '2' }}
+          # Continuous reminder-cadence formula (replaced the old fixed
+          # tiers 2026-07-29) -- see shared/reminders.py and
+          # .env.example for the full explanation of each constant.
+          ASSIGNMENT_ALPHA_HOURS_PER_DAY: ${{ vars.ASSIGNMENT_ALPHA_HOURS_PER_DAY || '3.4' }}
+          ASSIGNMENT_FLOOR_HOURS: ${{ vars.ASSIGNMENT_FLOOR_HOURS || '2.0' }}
+          ASSIGNMENT_CEILING_HOURS: ${{ vars.ASSIGNMENT_CEILING_HOURS || '48.0' }}
+          TASK_ALPHA_HOURS_PER_DAY: ${{ vars.TASK_ALPHA_HOURS_PER_DAY || '24.0' }}
+          TASK_FLOOR_HOURS: ${{ vars.TASK_FLOOR_HOURS || '1.0' }}
+          TASK_CEILING_HOURS: ${{ vars.TASK_CEILING_HOURS || '72.0' }}
+          PRIORITY_MULTIPLIER_HIGH: ${{ vars.PRIORITY_MULTIPLIER_HIGH || '0.5' }}
+          PRIORITY_MULTIPLIER_MEDIUM: ${{ vars.PRIORITY_MULTIPLIER_MEDIUM || '1.0' }}
+          PRIORITY_MULTIPLIER_LOW: ${{ vars.PRIORITY_MULTIPLIER_LOW || '2.0' }}
+          REMINDER_JITTER_FRACTION: ${{ vars.REMINDER_JITTER_FRACTION || '0.25' }}
+          MAX_NOTIFICATIONS_PER_PASS: ${{ vars.MAX_NOTIFICATIONS_PER_PASS || '3' }}
+          EVENT_REMINDER_HOUR: ${{ vars.EVENT_REMINDER_HOUR || '07:00' }}
           CLOUD_REMINDERS: ${{ vars.CLOUD_REMINDERS || 'true' }}
           CLOUD_REMINDER_LAG_MINUTES: ${{ vars.CLOUD_REMINDER_LAG_MINUTES || '5' }}
           CLASSROOM_LOOKBACK_HOURS: ${{ vars.CLASSROOM_LOOKBACK_HOURS || '48' }}

@@ -127,3 +127,24 @@ def resolve(course_name: str | None, options: list[str]) -> str | None:
     if len(scored) > 1 and best_score - scored[1][0] < AMBIGUITY_MARGIN:
         return None  # too close to call — better blank than wrong
     return best_option
+
+
+# Keyed by the LIVE Notion option name, not a corrected spelling — Notion
+# matches on exact string, so "AP Psycology" (verified via curl 2026-07-28)
+# has to be the key until Peter renames the option itself. If he does,
+# this dict needs the matching edit or that class silently loses its emoji.
+CLASS_EMOJI = {
+    "AP US History": "🏛️",
+    "AP Psycology": "🧠",
+    "AP Studio Art": "🎨",
+    "AP Pre-Calc": "📐",
+    "AP Physics": "⚛️",
+    "AP Stats": "📊",
+    "AP Lang": "✍️",
+    "Leadership": "🧭",
+}
+
+
+def class_emoji(name: str | None) -> str:
+    """Emoji for a canonical Class option name, or "" if unset/unknown."""
+    return CLASS_EMOJI.get(name or "", "")

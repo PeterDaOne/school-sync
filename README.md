@@ -111,6 +111,32 @@ itself cleanly and everything else keeps running.
 3. Subscribe to that exact topic in the app
 4. Put it in `.env` as `NTFY_TOPIC`
 
+**Optional: the "Mark done" button.** Notifications can carry a button
+that marks the item Done in Notion without opening any app. It works via
+a *second, distinct* ntfy topic — never NOTION_TOKEN, never the same
+topic as step 2 above:
+
+5. Pick **another** random topic name, different from `NTFY_TOPIC`
+6. Put it in `.env` as `NTFY_COMMAND_TOPIC` — no need to subscribe to it
+   in the app, nothing is ever meant to be read from it directly
+7. Leave it unset and the button is simply absent from every
+   notification; nothing else breaks
+
+Why a second topic instead of the button PATCHing Notion directly: ntfy
+topics are unauthenticated, and the button fires straight from the
+phone with no server in between. A button that carried a real Notion
+credential would put that credential in every single notification,
+forever, readable by anyone who ever learns the topic name. The command
+topic carries only a bare page id — worst case if it leaks, someone can
+mark your homework Done, which costs you two seconds in Notion to undo.
+See `shared/commands.py` for the polling side.
+
+The button clears itself almost instantly once tapped (ntfy accepting
+its own publish is fast), but the item isn't actually marked Done in
+Notion until the next sync pass picks up the command — up to ~2 minutes
+while the Mac is awake, up to ~10 minutes from the cloud alone. Same
+"not instant" honesty as everything else in this system.
+
 ### 5. Fill in `.env`
 
 ```bash
@@ -141,9 +167,15 @@ each of these under Settings → Secrets and variables → Actions:
 `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_CALENDAR_ID`,
 `ANTHROPIC_API_KEY`, `SCHOOL_EMAIL_HINTS`, `NTFY_TOPIC`
 
-Tuning values (quiet hours, intervals, timezone) go under the
-**Variables** tab, not Secrets — the workflow has defaults for all of
-them, but `SCHOOL_TIMEZONE` is worth setting explicitly if you ever
+`NTFY_COMMAND_TOPIC` (the "Mark done" button, see step 4 above) is
+optional — add it here too if you set one up locally, using the same
+value from `.env`, or skip it and the button just won't appear on
+cloud-sent reminders.
+
+Tuning values (quiet hours, reminder-cadence constants, timezone) go
+under the **Variables** tab, not Secrets — the workflow has defaults
+for all of them (see `.env.example` for what each one does and its
+default), but `SCHOOL_TIMEZONE` is worth setting explicitly if you ever
 move, since the runners are UTC.
 
 **Watch the tab you are on.** Secrets and Variables live on the same
@@ -273,10 +305,22 @@ Key ideas worth knowing before you change anything:
 
 ## Known limits
 
-- Not instant: 60 sec worst case while the Mac is awake, 30 min otherwise.
+- Not instant: 60 sec worst case while the Mac is awake, under 6 min
+  otherwise (via the external dispatch scheduler — see "Beating
+  GitHub's scheduler" above; without it, up to ~3.5 hours on the
+  built-in cron alone).
 - Email parsing isn't perfect — that's why it lands as `[unconfirmed]`.
 - Tapping a notification opens the ntfy app briefly before handing off
   to Notion. That's an OS-level constraint on third-party push apps, not
   something this code can fix.
-- Overdue items remind every 2 hours forever until you mark them Done.
-  That's deliberate.
+- Overdue items remind forever until you mark them Done — at a rate
+  that depends on type and priority (Tasks nag harder than Assignments
+  once missed; High priority harder than Low), not a flat interval
+  anymore. See `.env.example` for the exact constants.
+- The "Mark done" button's tap effect is near-instant, but the Notion
+  page doesn't actually flip to Done until the next sync pass notices
+  the command — up to ~2 min locally, ~10 min from the cloud alone.
+- `shared/classmap.py`'s `CLASS_EMOJI` dict is keyed by exact Notion
+  Class option names. Rename a class in Notion and that class silently
+  loses its emoji (title still works fine, just plain) until the dict
+  is updated to match.
