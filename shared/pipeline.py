@@ -23,6 +23,15 @@ ERROR POLICY, stated deliberately rather than just made consistent:
   - Errors that mean *nothing* can work (a missing token, an
     unreachable Notion) are raised, not swallowed. Retrying them per
     item would just produce N copies of the same message.
+
+  - An undelivered push counts toward the exit code even though it is
+    not an item failure. This was a real hole: notify() returning False
+    correctly skips the Last Reminded stamp so the reminder retries, but
+    it used to touch nothing else, so a run that dropped every single
+    reminder exited 0 and looked perfectly healthy in the Actions tab.
+    A misspelled NTFY_TOPIC secret hid behind that for a full day on
+    2026-07-29. Notifications are the product; silent total failure is
+    the loudest thing this system can do wrong.
 """
 
 import sys
@@ -41,10 +50,16 @@ class Report:
     synced: int = 0
     reminded: int = 0
     failures: list[str] = field(default_factory=list)
+    # Reminders that were due, cleared every guard, and still did not
+    # reach the phone because notify() returned False. Counted apart
+    # from `failures` because the item itself is fine — nothing about it
+    # needs fixing and it will retry unprompted on the next pass. It
+    # still has to affect the exit code: see `ok`.
+    notify_failures: int = 0
 
     @property
     def ok(self) -> bool:
-        return not self.failures
+        return not self.failures and not self.notify_failures
 
     def summary(self, source: str) -> str:
         parts = []
@@ -52,6 +67,8 @@ class Report:
             parts.append(f"synced {self.synced} item(s)")
         if self.reminded:
             parts.append(f"sent {self.reminded} reminder(s)")
+        if self.notify_failures:
+            parts.append(f"{self.notify_failures} reminder(s) UNDELIVERED")
         if self.failures:
             parts.append(f"{len(self.failures)} item(s) FAILED")
         return f"[{source}] " + (", ".join(parts) if parts else "nothing to do")
@@ -133,6 +150,13 @@ def run_sync_pass(
             if notify(NOTIFY_TITLE, message, click_url=item.get("url")):
                 notion_client.mark_reminded(item["id"], timeutil.utc_now_iso())
                 report.reminded += 1
+            else:
+                # Deliberately NOT added to `failures`: the item synced
+                # fine and the unstamped Last Reminded means it retries
+                # next pass. But a run where every push was dropped must
+                # not look healthy — that exact situation (a misspelled
+                # NTFY_TOPIC secret) stayed green for a full day.
+                report.notify_failures += 1
         except Exception as e:
             report.failures.append(f"reminder failed for {item['name']!r}: {e}")
             traceback.print_exc(file=sys.stderr)
@@ -145,4 +169,11 @@ def finish(report: Report, source: str) -> int:
     print(report.summary(source))
     for failure in report.failures:
         print(f"[{source}] FAILED: {failure}", file=sys.stderr)
-    return 1 if report.failures else 0
+    if report.notify_failures:
+        print(
+            f"[{source}] {report.notify_failures} reminder(s) were due but could "
+            f"not be delivered — see the [notify] line above for the cause. They "
+            f"were NOT marked as reminded and will retry on the next pass.",
+            file=sys.stderr,
+        )
+    return 0 if report.ok else 1
