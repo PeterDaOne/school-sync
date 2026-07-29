@@ -2,13 +2,14 @@
 
 Copy the block below into a fresh Claude Code session to bring it up to
 speed on this project. **Trim the "What I want you to work on" section to
-a single item first** — leaving all three invites a session that
+a single item first** — leaving several invites a session that
 half-finishes each one.
 
 Keep this file current. It is the fast path back into the project after a
 context reset, and a stale handoff is worse than none: it will be trusted.
 
-Last updated: 2026-07-28 (commit 77d4a31)
+Last updated: 2026-07-29 (commit 5f3f28e + uncommitted changes to
+shared/pipeline.py and a new tests/test_pipeline.py)
 
 ---
 
@@ -22,42 +23,48 @@ the last session and is accurate. Don't rediscover what's already there.
 
 ## Where things actually stand
 
-Repo: https://github.com/PeterDaOne/school-sync (public), at commit 77d4a31.
-106 stdlib-unittest tests, green in CI. launchd job loaded and healthy.
+Repo: https://github.com/PeterDaOne/school-sync (public), at commit 5f3f28e.
+115 stdlib-unittest tests, green in CI. launchd job loaded and healthy.
 
 **Verified working against real data:** the reminder engine end-to-end
 (escalating cadence, quiet hours, capture notifications, tap-to-open
 links), Notion→Calendar sync with no duplicates, the cloud-vs-local
-takeover lag, and timezone handling.
+takeover lag, and timezone handling. **As of 2026-07-29, add the whole
+cloud path:** all 7 secrets are in, cloud_sync completes real runs, and
+a reminder fired from GitHub Actions to my phone with the launchd job
+unloaded (run #21 — push at 18:50:54Z inside the run window).
 
 **Written but NEVER run against real data:** the entire capture layer
 (gmail_scan.py, classroom_scan.py). My personal Google account has zero
 Classroom courses and ANTHROPIC_API_KEY is still the placeholder, so
 neither sweep has processed a single real item. Four bugs were found in
-it by code-tracing alone last session — assume more exist.
+it by code-tracing alone — assume more exist. This is unchanged and is
+now the largest untested surface in the project.
 
-## The one thing blocking everything
+## Nothing is blocking
 
-The 7 repo secrets are not added yet, so every 5-minute scheduled run
-fails at "Run cloud sync" and emails me. The `test` job passes, which
-proves the cron fires reliably — cloud_sync itself has still never
-completed a real run. Until that's fixed, reminders only work when my
-MacBook happens to be awake.
+The secrets are in and the cloud path works. Two things are worth
+knowing before picking anything up:
+
+1. **The `2-59/5` cron does not fire every 5 minutes.** Measured over
+   ~25h of live history: ~110 min average gap, 204 min worst. GitHub
+   deprioritizes sub-hourly schedules on public repos. Worst-case
+   reminder latency with the Mac shut is a few hours. CLAUDE.md has the
+   numbers; earlier claims of a 5-minute cadence were never measured.
+2. **A failed push used to produce a green run — fixed 2026-07-29.**
+   Report.notify_failures now reaches the exit code, so a dropped push
+   turns the run red. Verified by reproducing the original failure
+   (NTFY_TOPIC="" python3 cloud_sync.py → exit 1). Not yet committed.
 
 ## What I want you to work on
 
 [EDIT THIS — pick one:]
 
-1. Walk me through adding the 7 GitHub secrets, then verify the first
-   real cloud_sync run end-to-end from the Actions logs: confirm it
-   reached Notion and Calendar, and force a real reminder to my phone
-   with the MacBook shut. This is the highest-value thing.
-
-2. Add a keepalive so GitHub doesn't disable the scheduled workflow
+1. Add a keepalive so GitHub doesn't disable the scheduled workflow
    after 60 days of no commits — it would go silent in late September
    with no warning.
 
-3. Re-run the Google OAuth consent flow with the added gmail.modify
+2. Re-run the Google OAuth consent flow with the added gmail.modify
    scope (README has the command). Without it the Gmail sweep falls back
    to a narrow window; with it, each email is classified exactly once.
 
