@@ -47,6 +47,23 @@ jobs:
     # Don't touch live Notion data from a pull request.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Never let two cloud syncs run at once. Once an external scheduler
+    # is dispatching this workflow (see README "Beating GitHub's
+    # scheduler"), a dispatched run and a leftover scheduled run can
+    # land on top of each other. Both would read the same Last Reminded
+    # and both would send -- reminders.due_for_reminder's lag separates
+    # the cloud from the Mac, but nothing separates the cloud from
+    # itself, and pipeline._should_send's recheck narrows that window
+    # without closing it.
+    #
+    # cancel-in-progress is false on purpose: cancelling mid-run could
+    # kill the process between a successful ntfy push and the Last
+    # Reminded write, which would re-send that reminder on the next
+    # pass. Queueing is the safe direction -- runs are ~1 minute and
+    # dispatches are 5 minutes apart, so a queue never builds.
+    concurrency:
+      group: school-sync-cloud
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 

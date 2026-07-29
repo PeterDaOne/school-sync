@@ -146,6 +146,58 @@ Tuning values (quiet hours, intervals, timezone) go under the
 them, but `SCHOOL_TIMEZONE` is worth setting explicitly if you ever
 move, since the runners are UTC.
 
+**Watch the tab you are on.** Secrets and Variables live on the same
+page, and a value saved under Variables appears in the list looking
+exactly like a saved secret while `${{ secrets.NAME }}` resolves to an
+empty string. The same goes for a misspelled name — `NFTY_TOPIC` cost a
+full day of silently dropped reminders. Seeing the name in the list is
+not verification; a green run is not verification either. The proof is
+a push arriving on your phone.
+
+### 8. Beating GitHub's scheduler
+
+**The `cron:` in the workflow is a request, not a promise.** Measured
+against ~25h of live history, a `2-59/5` cron (every 5 minutes)
+actually delivered runs **~110 minutes apart on average, 204 minutes at
+worst** — about 13 runs a day instead of 288. GitHub deprioritizes
+sub-hourly schedules on public repos, and scheduled runs are explicitly
+best-effort. Left alone, that is your worst-case reminder delay
+whenever the Mac is shut.
+
+**`workflow_dispatch` is not throttled.** A manual or API-triggered run
+starts within about 30 seconds. So an external scheduler that calls the
+dispatch API gives you the cadence the cron only pretends to:
+
+```
+POST https://api.github.com/repos/<you>/school-sync/actions/workflows/sync.yml/dispatches
+Accept: application/vnd.github+json
+Authorization: Bearer <fine-grained PAT>
+X-GitHub-Api-Version: 2022-11-28
+
+{"ref": "main"}
+```
+
+Expect `204 No Content` on success. Any free scheduler works —
+[cron-job.org](https://cron-job.org) needs no code, and a Cloudflare
+Worker with a cron trigger keeps the token inside an account you
+already control. Every 5 minutes is the sweet spot: it matches
+`CLOUD_REMINDER_LAG_MINUTES`, and each dispatch spins up two runner
+VMs, so every-minute pinging is a lot of machine time for four minutes
+of latency.
+
+**Make the token fine-grained**, scoped to this one repository, with
+**Actions: Read and write** and nothing else, and give it an expiry.
+Worst case if it leaks, someone can trigger your workflow — they cannot
+read your secrets. Treat it like a password anyway; it lives outside
+GitHub, in whatever service you point at this.
+
+**Leave the `cron:` schedule enabled.** It costs nothing and becomes
+the fallback for when the external scheduler is down — which is the
+whole reason cloud_sync exists in the first place. The `concurrency`
+block on the sync job is what makes running both safe: without it, a
+scheduled run and a dispatched run can overlap, read the same
+`Last Reminded`, and both send the same reminder.
+
 ---
 
 ## Daily use
