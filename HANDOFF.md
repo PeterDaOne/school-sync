@@ -56,9 +56,21 @@ correctly for all 10 live incomplete items; three real ntfy sends came
 back with the new emoji intact and the `Tags` header correctly ABSENT;
 both entrypoints ran clean end to end; launchd reloaded and fired.
 
-**Written but NEVER run against real data:** the mark-done button itself
-(NTFY_COMMAND_TOPIC isn't set up yet — that's a step only Peter can do,
-same pattern as every other secret this project has needed). The whole
+**The mark-done button is now LIVE and verified** (2026-07-30):
+NTFY_COMMAND_TOPIC was generated into `.env`, the plist regenerated, and
+the full loop driven end to end — a simulated tap (bare page id POSTed
+to the command topic) was picked up by the next `local_sync` pass
+(`applied 1 mark-done command(s)`) and "Do dishes" flipped to Done in
+real Notion. A real notification carrying the button was then sent and
+polled back, confirming the `Actions:` header is on the wire with the
+right page id. **Still unconfirmed: Peter physically tapping it on the
+phone** — everything up to the phone is proven.
+
+**NOT done: the GitHub secret.** `NTFY_COMMAND_TOPIC` is in `.env` but
+not in repo secrets, so the button appears on Mac-sent reminders and is
+absent from cloud-sent ones. Same value, Secrets tab (not Variables).
+
+**Written but NEVER run against real data:** the whole
 capture layer (gmail_scan.py, classroom_scan.py) — its `For` call sites
 were updated and the non-class-category exclusion is unit-tested against
 the live option list, but neither sweep has still ever created a real
