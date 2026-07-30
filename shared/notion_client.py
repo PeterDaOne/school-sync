@@ -12,18 +12,20 @@ through a tool that might reformat them. That verification matters:
 schema, and at least one tool silently corrected the typo in its own
 output while the real property was still wrong. Check with curl.
 
-Live schema, 2026-07-28:
+Live schema, re-verified by raw curl 2026-07-30:
     Title           title
     Type            select    Assignments / Tasks / Events
-    Class           select
+    For             select    8 classes + School / Personal / Friends / Work
+                              (renamed from "Class" 2026-07-30; see classmap)
     Priority        select    High / Medium / Low
     Status          status    Not Started / In Progress / Done
     Input Type      select    Manual / Email / Syllabus / Classroom
-    Task Type       multi_select
+    Task Type       multi_select  Peter's own; nothing here reads it
     Due Date        date
     Last Synced     date      written by us, not the user
     Last Reminded   date      written by us, not the user
     External ID     rich_text written by us — capture dedup key
+    Reminders Today number    written by us — backs the daily cap
     Days Until Due  formula   for Peter's views only; see reminders.py
     Resources       rich_text reserved for a later phase, untouched
 """
@@ -52,6 +54,16 @@ EXTERNAL_ID_PROP = "External ID"
 # shared/classmap.py for why non-class options must never be matched
 # against automatically.
 CATEGORY_PROP = "For"
+
+# How many notifications this item has already had TODAY. Added
+# 2026-07-30 to back a genuine daily cap (pipeline._allocate).
+#
+# Deliberately per-item rather than one global counter row: `Last
+# Reminded` already tells us which day the count belongs to, so the
+# counter self-resets at midnight with no cleanup job, no extra database,
+# and no sentinel page polluting Peter's own views. Total sends today is
+# just the sum across items whose Last Reminded is today.
+REMINDER_COUNT_PROP = "Reminders Today"
 
 MAX_ATTEMPTS = 5
 
@@ -135,13 +147,18 @@ def mark_synced(page_id: str, timestamp_iso: str):
     )
 
 
-def mark_reminded(page_id: str, timestamp_iso: str):
-    """Stamp Last Reminded so the reminder engine knows when it last fired."""
-    _request(
-        "PATCH",
-        f"/pages/{page_id}",
-        json={"properties": {"Last Reminded": {"date": {"start": timestamp_iso}}}},
-    )
+def mark_reminded(page_id: str, timestamp_iso: str, count_today: int | None = None):
+    """
+    Stamp Last Reminded so the reminder engine knows when it last fired.
+
+    `count_today` writes REMINDER_COUNT_PROP in the SAME request -- one
+    round trip, and the pair can never disagree about which day the count
+    belongs to, since Last Reminded is what dates it.
+    """
+    props = {"Last Reminded": {"date": {"start": timestamp_iso}}}
+    if count_today is not None:
+        props[REMINDER_COUNT_PROP] = {"number": count_today}
+    _request("PATCH", f"/pages/{page_id}", json={"properties": props})
 
 
 def mark_done(page_id: str):
@@ -298,12 +315,35 @@ def extract_fields(page: dict) -> dict:
         "source": _select(props.get("Input Type")) or "Manual",
         "last_reminded": _date(props.get("Last Reminded")),
         "external_id": _rich_text(props.get(EXTERNAL_ID_PROP)),
+        # Only meaningful alongside last_reminded -- it counts sends on
+        # the day that stamp names. pipeline decides whether that day is
+        # today; extract_fields stays a faithful read.
+        "reminders_today": (props.get(REMINDER_COUNT_PROP) or {}).get("number") or 0,
         # Notion's own timestamps. created_time is the reference point
         # for the cloud reminder lag on capture notifications, which have
         # no previous reminder to measure from.
         "created_time": page.get("created_time"),
         "last_edited_time": page.get("last_edited_time"),
     }
+
+
+def ensure_reminder_count_property() -> bool:
+    """
+    Make sure the daily-count property exists, creating it if not. Same
+    self-healing reasoning as ensure_external_id_property: Peter edits
+    this schema by hand, and a missing counter would silently disable the
+    daily cap rather than fail loudly.
+    """
+    db = _request("GET", f"/databases/{_database_id()}")
+    if REMINDER_COUNT_PROP in db.get("properties", {}):
+        return False
+    print(f"[notion] '{REMINDER_COUNT_PROP}' property missing — creating it", file=sys.stderr)
+    _request(
+        "PATCH",
+        f"/databases/{_database_id()}",
+        json={"properties": {REMINDER_COUNT_PROP: {"number": {}}}},
+    )
+    return True
 
 
 def ensure_external_id_property() -> bool:

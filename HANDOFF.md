@@ -29,7 +29,7 @@ the last session and is accurate. Don't rediscover what's already there.
 
 ## Where things actually stand
 
-Repo: https://github.com/PeterDaOne/school-sync (public). 210
+Repo: https://github.com/PeterDaOne/school-sync (public). 223
 stdlib-unittest tests (up from 171 this session), green locally and in
 CI. launchd job loaded and healthy under the new code.
 

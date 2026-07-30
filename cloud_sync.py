@@ -72,6 +72,16 @@ def main() -> int:
         failures.append(f"external-id property check: {e}")
         print(f"[{SOURCE}] could not verify dedup property: {e}", file=sys.stderr)
 
+    # Same self-healing for the daily-count property. If it goes missing
+    # the counter reads 0 for every item, which silently disables the
+    # daily cap rather than failing loudly.
+    try:
+        if notion_client.ensure_reminder_count_property():
+            print(f"[{SOURCE}] created missing '{notion_client.REMINDER_COUNT_PROP}' property")
+    except Exception as e:
+        failures.append(f"reminder-count property check: {e}")
+        print(f"[{SOURCE}] could not verify counter property: {e}", file=sys.stderr)
+
     # One query feeds both sweeps' dedup checks — zero extra API calls.
     known_ids: set[str] = set()
     try:

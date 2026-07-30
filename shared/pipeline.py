@@ -72,6 +72,12 @@ class Report:
     # reminders.due_for_reminder. Not a failure and not a deferral: the
     # item will not ask again until a full interval has passed.
     suppressed: int = 0
+    # Diagnostics, not outcomes: how much the cadence was stretched for
+    # the current workload, and how many notifications had already gone
+    # out today when this pass started. Both are otherwise invisible and
+    # both are the first things worth knowing when volume looks wrong.
+    load_scale: float = 1.0
+    sent_today: int = 0
 
     @property
     def ok(self) -> bool:
@@ -93,6 +99,8 @@ class Report:
             parts.append(f"{self.notify_failures} reminder(s) UNDELIVERED")
         if self.failures:
             parts.append(f"{len(self.failures)} item(s) FAILED")
+        if self.load_scale > 1.0 and (self.reminded or self.deferred):
+            parts.append(f"cadence x{self.load_scale:.1f} for load")
         return f"[{source}] " + (", ".join(parts) if parts else "nothing to do")
 
 
@@ -152,23 +160,43 @@ def run_sync_pass(
         traceback.print_exc(file=sys.stderr)
 
     candidates: list[tuple[dict, "reminders.Reminder"]] = []
-    # "Guarantee one each, then urgent gets the rest" needs to know which
-    # items already had a reminder today. Last Reminded answers that
-    # exactly, for free, and it is the only per-item history that survives
-    # GitHub's ephemeral runners — so no new state is introduced.
     reminded_today: set[str] = set()
     today = now.astimezone(timeutil.school_tz()).date()
 
+    # Extract everything up front: both the load scaling and the daily
+    # cap are properties of the WHOLE workload, so they have to be known
+    # before the first reminder decision is made.
+    parsed: list[tuple[dict, dict]] = []
     for page in notion_client.get_all_items():
-        # extract_fields is outside the try only so a genuinely
-        # unparseable page still gets named in the error below.
         try:
-            item = notion_client.extract_fields(page)
+            parsed.append((page, notion_client.extract_fields(page)))
         except Exception as e:
             report.failures.append(f"unparseable page {page.get('id', '?')}: {e}")
             traceback.print_exc(file=sys.stderr)
-            continue
 
+    def _is_today(item: dict) -> bool:
+        if not item.get("last_reminded"):
+            return False
+        try:
+            return timeutil.parse(item["last_reminded"]).astimezone(
+                timeutil.school_tz()
+            ).date() == today
+        except (ValueError, TypeError):
+            return False
+
+    active = sum(
+        1
+        for _, i in parsed
+        if not i.get("is_complete") and i.get("type_name") in ("Assignments", "Tasks")
+    )
+    cadence = cadence.for_load(active)
+    # Exact count of notifications already delivered today, summed from
+    # per-item counters dated by their own Last Reminded stamp.
+    sent_today = sum(i.get("reminders_today", 0) for _, i in parsed if _is_today(i))
+    report.load_scale = cadence.load_scale
+    report.sent_today = sent_today
+
+    for page, item in parsed:
         try:
             if state.needs_sync(page):
                 calendar_client.upsert_event(item)
@@ -181,14 +209,8 @@ def run_sync_pass(
         if not send_reminders:
             continue
 
-        if item.get("last_reminded"):
-            try:
-                if timeutil.parse(item["last_reminded"]).astimezone(
-                    timeutil.school_tz()
-                ).date() == today:
-                    reminded_today.add(item["id"])
-            except Exception:
-                pass  # an unparseable stamp just means "not today"
+        if _is_today(item):
+            reminded_today.add(item["id"])
 
         # Reminder timing depends on the clock (due date, quiet hours),
         # not on whether the item was just edited, so this runs on every
@@ -201,7 +223,21 @@ def run_sync_pass(
                 # Came due inside quiet hours. Spend the slot without
                 # pushing, so it does NOT pile up and detonate the moment
                 # quiet hours end — see reminders.due_for_reminder.
-                notion_client.mark_reminded(item["id"], timeutil.utc_now_iso())
+                # The counter must still be REWRITTEN, even though nothing
+                # was delivered. This stamp moves Last Reminded forward --
+                # and Last Reminded is what dates the counter. Leaving the
+                # count alone while moving its date carries yesterday's
+                # total into today, so the day opens with a phantom spent
+                # budget. That bug collapsed a simulated week from 41
+                # pushes to 7 before it was caught: quiet hours run every
+                # night, so it poisoned every single morning.
+                #
+                # Carry today's real delivered count (0 on a new day).
+                notion_client.mark_reminded(
+                    item["id"],
+                    timeutil.utc_now_iso(),
+                    item.get("reminders_today", 0) if _is_today(item) else 0,
+                )
                 report.suppressed += 1
                 continue
             candidates.append((item, reminder))
@@ -209,7 +245,7 @@ def run_sync_pass(
             report.failures.append(f"reminder failed for {item['name']!r}: {e}")
             traceback.print_exc(file=sys.stderr)
 
-    for item, reminder in _allocate(candidates, reminded_today, cadence, report):
+    for item, reminder in _allocate(candidates, reminded_today, cadence, report, sent_today):
         try:
             if not _should_send(item, reminder, recheck_before_send):
                 continue
@@ -224,7 +260,12 @@ def run_sync_pass(
                 tags=reminder.tags,
                 actions=build_mark_done_action(item["id"]),
             ):
-                notion_client.mark_reminded(item["id"], timeutil.utc_now_iso())
+                # Reset to 1 rather than increment when the item's own
+                # previous reminder was on an earlier day -- that is what
+                # makes the counter self-reset at midnight without a
+                # cleanup job.
+                count = (item.get("reminders_today", 0) + 1) if _is_today(item) else 1
+                notion_client.mark_reminded(item["id"], timeutil.utc_now_iso(), count)
                 report.reminded += 1
             else:
                 # Deliberately NOT added to `failures`: the item synced
@@ -256,6 +297,7 @@ def _allocate(
     reminded_today: set[str],
     cadence: "reminders.Cadence",
     report: "Report",
+    sent_today: int = 0,
 ) -> list[tuple[dict, "reminders.Reminder"]]:
     """
     Decide which of this pass's due reminders actually get sent.
@@ -273,24 +315,29 @@ def _allocate(
     is DEFERRED, never dropped: Last Reminded is untouched, so it is
     reconsidered on the very next pass.
 
-    WHAT THIS DOES NOT DO — read before trusting the name. `daily_budget`
-    is not an exact daily counter. Doing that honestly would mean
-    persisting a per-day send count somewhere both the Mac and GitHub's
-    ephemeral runners can see, i.e. a new Notion property, and it isn't
-    worth one. What it actually bounds is how many DISTINCT items may be
-    in "already reminded today, wants another" state in a single pass.
-    The real limit on daily volume is the cadence itself — an item cannot
-    come due again until its interval elapses, and overdue decay stretches
-    that interval every day. Measured against Peter's real items, decay is
-    what takes 238 pushes/week down to ~108; this allocation is what stops
-    one loud item from eating a whole pass.
+    `daily_budget` IS a true daily ceiling as of 2026-07-30, backed by
+    real per-item counts (notion_client.REMINDER_COUNT_PROP) rather than
+    the per-pass approximation it used to be. `sent_today` is the exact
+    number already delivered today, so the room left is
+    daily_budget - sent_today and it is enforced across BOTH phases,
+    including the guarantee.
+
+    That last part is the deliberate tradeoff: on a heavy day the cap can
+    swallow an item's only notification of the day. It has to, or the cap
+    is not a cap. Load scaling exists to keep the cap from binding often
+    -- it stretches every interval as the workload grows, so at 24 items
+    the cadence produces far fewer candidates in the first place.
+
+    Nothing is dropped, only DEFERRED: Last Reminded is untouched for
+    anything not sent, so it is reconsidered next pass (and tomorrow, on
+    a fresh budget).
     """
+    room = max(0, cadence.daily_budget - sent_today)
     ordered = sorted(candidates, key=lambda c: _urgency(*c))
     first_time = [c for c in ordered if c[0]["id"] not in reminded_today]
     repeats = [c for c in ordered if c[0]["id"] in reminded_today]
 
-    allowed = first_time + repeats[: cadence.daily_budget]
-    sending = allowed[: cadence.max_per_pass]
+    sending = (first_time + repeats)[: min(room, cadence.max_per_pass)]
     report.deferred += len(candidates) - len(sending)
     return sending
 

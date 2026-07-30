@@ -129,10 +129,16 @@ DEFAULT_OVERDUE_MAX_INTERVAL = 24.0
 # Enough doublings to blow past any sane OVERDUE_MAX_INTERVAL_HOURS.
 _MAX_DECAY_DOUBLINGS = 16
 
-# Ceiling on how many items may be in "already reminded today, wants
-# another" state at once. See pipeline._allocate for what this does and,
-# importantly, what it does not guarantee.
-DEFAULT_DAILY_BUDGET = 8
+# HARD CEILING on notifications delivered in one local day, across all
+# items. Backed by real per-item counts (notion_client.REMINDER_COUNT_PROP),
+# so unlike the earlier version of this constant it is an exact daily
+# total rather than a per-pass guess.
+#
+# It exists because notification volume was roughly LINEAR in item count:
+# 4 items -> 41 pushes/week, but a realistic 24-item load -> 333/week
+# with a peak of 69 in a single day. Load scaling smooths the cadence;
+# this is the backstop for the days it isn't enough.
+DEFAULT_DAILY_BUDGET = 6
 
 # THE HARD FLOOR: no item may ever notify twice inside this window.
 # Peter's rule, 2026-07-30, and it is deliberately blunt -- it overrides
@@ -152,6 +158,21 @@ DEFAULT_DAILY_BUDGET = 8
 #      window (covers EVERY path, including Events' fixed tiers and any
 #      future one, and survives someone re-tuning the constants above).
 DEFAULT_MIN_INTERVAL_HOURS = 2.0
+
+# LOAD SCALING (added 2026-07-30). Every interval is multiplied by
+# (active items / LOAD_SCALE_TARGET_ITEMS), floored at 1.0.
+#
+# Without it the system's notification volume is roughly LINEAR in item
+# count, because each item is independently entitled to its own cadence.
+# Simulated against a realistic post-capture load: 4 items -> 41
+# pushes/week, but 24 items -> 333/week and a peak of 69 in one day.
+# That is what made "turn on Classroom capture" unshippable.
+#
+# With it, more items means each one nags proportionally less and total
+# volume stays roughly flat (~65/week) at ANY item count. Stateless: the
+# pipeline already knows how many active items there are, so this needs
+# no schema change and nothing persisted.
+DEFAULT_LOAD_SCALE_TARGET = 5
 
 
 def _parse_hhmm(s: str, fallback: str) -> dtime:
@@ -238,6 +259,10 @@ class Cadence:
     overdue_max_interval: float = DEFAULT_OVERDUE_MAX_INTERVAL
     daily_budget: int = DEFAULT_DAILY_BUDGET
     min_interval: float = DEFAULT_MIN_INTERVAL_HOURS
+    # Set per pass by pipeline.run_sync_pass via dataclasses.replace --
+    # it is a property of the current workload, not of configuration.
+    load_scale: float = 1.0
+    load_scale_target: int = DEFAULT_LOAD_SCALE_TARGET
 
     @classmethod
     def from_env(cls) -> "Cadence":
@@ -335,6 +360,20 @@ class Cadence:
                 DEFAULT_MIN_INTERVAL_HOURS,
                 "MIN_INTERVAL_HOURS",
             ),
+            load_scale_target=_parse_int(
+                config.optional("LOAD_SCALE_TARGET_ITEMS", str(DEFAULT_LOAD_SCALE_TARGET)),
+                DEFAULT_LOAD_SCALE_TARGET,
+                "LOAD_SCALE_TARGET_ITEMS",
+            ),
+        )
+
+    def for_load(self, active_items: int) -> "Cadence":
+        """
+        This same Cadence, scaled for how much is actually on Peter's
+        plate right now. Called once per pass; see DEFAULT_LOAD_SCALE_TARGET.
+        """
+        return replace(
+            self, load_scale=max(1.0, active_items / max(1, self.load_scale_target))
         )
 
     def in_quiet_hours(self, moment: datetime) -> bool:
@@ -378,6 +417,9 @@ class Cadence:
             hours = min(hours, self.overdue_max_interval)
 
         hours *= _jitter_factor(page_id, self.jitter_fraction)
+        # Load scaling last, so a heavy workload stretches everything
+        # uniformly rather than distorting the urgency ordering.
+        hours *= self.load_scale
         return max(hours, self.min_interval)
 
     def overdue_decay(self, days_until: float) -> float:

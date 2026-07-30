@@ -19,7 +19,7 @@ from unittest import mock
 
 import tests.context  # noqa: F401  (path + timezone setup)
 
-from shared import pipeline, reminders
+from shared import pipeline, timeutil, reminders
 
 
 class ReportSummary(unittest.TestCase):
@@ -93,7 +93,8 @@ class RunSyncPassNotifyWiring(unittest.TestCase):
             nc.get_all_items.return_value = [page]
             nc.extract_fields.return_value = dict(ITEM)
             st.needs_sync.return_value = False
-            cadence = mock.Mock(max_per_pass=max_per_pass, daily_budget=8)
+            cadence = mock.Mock(max_per_pass=max_per_pass, daily_budget=8, load_scale=1.0)
+            cadence.for_load.return_value = cadence
             rm.Cadence.from_env.return_value = cadence
             rm.due_for_reminder.return_value = reminder or REMINDER
             report = pipeline.run_sync_pass(
@@ -176,7 +177,9 @@ class QuietHoursConsumeTheSlot(unittest.TestCase):
             nc.get_all_items.return_value = [page]
             nc.extract_fields.return_value = dict(ITEM)
             st.needs_sync.return_value = False
-            rm.Cadence.from_env.return_value = mock.Mock(max_per_pass=3, daily_budget=8)
+            cadence = mock.Mock(max_per_pass=3, daily_budget=8, load_scale=1.0)
+            cadence.for_load.return_value = cadence
+            rm.Cadence.from_env.return_value = cadence
             rm.due_for_reminder.return_value = replace(REMINDER, silent=silent)
             report = pipeline.run_sync_pass("test", send_reminders=True)
             return report, nc, nf
@@ -213,7 +216,9 @@ class Allocation(unittest.TestCase):
     """
 
     def _cadence(self, max_per_pass=10, daily_budget=8):
-        return mock.Mock(max_per_pass=max_per_pass, daily_budget=daily_budget)
+        c = mock.Mock(max_per_pass=max_per_pass, daily_budget=daily_budget, load_scale=1.0)
+        c.for_load.return_value = c
+        return c
 
     def _cand(self, item_id, priority, due=None):
         return (
@@ -221,11 +226,11 @@ class Allocation(unittest.TestCase):
             replace(REMINDER, priority=priority),
         )
 
-    def _allocate(self, candidates, reminded_today, **kw):
+    def _allocate(self, candidates, reminded_today, sent_today=0, **kw):
         report = pipeline.Report()
         with mock.patch.object(pipeline.reminders, "due_datetime", return_value=None):
             sent = pipeline._allocate(
-                candidates, reminded_today, self._cadence(**kw), report
+                candidates, reminded_today, self._cadence(**kw), report, sent_today
             )
         return [c[0]["id"] for c in sent], report
 
@@ -251,11 +256,34 @@ class Allocation(unittest.TestCase):
         self.assertEqual(len(ids), 2)
         self.assertEqual(report.deferred, 4)
 
-    def test_first_timers_are_never_capped_by_the_daily_budget(self):
-        """The guarantee is a guarantee: the budget governs repeats only."""
+    def test_first_timers_are_capped_too_because_a_cap_must_be_a_cap(self):
+        """
+        REVERSED 2026-07-30. The budget used to govern repeats only, so a
+        first-time reminder could never be blocked. That made it not a
+        cap: at a realistic 24-item load the system produced 333
+        pushes/week with a peak of 69 in a day, almost all of them each
+        item's first of the day. A ceiling that exempts the common case
+        is not a ceiling.
+
+        Load scaling is what keeps this from binding often -- it stretches
+        every interval as the workload grows, so fewer candidates arrive
+        here in the first place.
+        """
         news = [self._cand(f"n{i}", 4) for i in range(6)]
-        ids, _ = self._allocate(news, reminded_today=set(), daily_budget=2)
-        self.assertEqual(len(ids), 6)
+        ids, report = self._allocate(news, reminded_today=set(), daily_budget=2)
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(report.deferred, 4)
+
+    def test_budget_counts_what_already_went_out_today(self):
+        news = [self._cand(f"n{i}", 4) for i in range(6)]
+        ids, _ = self._allocate(news, reminded_today=set(), daily_budget=6, sent_today=4)
+        self.assertEqual(len(ids), 2)
+
+    def test_exhausted_budget_sends_nothing(self):
+        news = [self._cand(f"n{i}", 4) for i in range(3)]
+        ids, report = self._allocate(news, reminded_today=set(), daily_budget=6, sent_today=6)
+        self.assertEqual(ids, [])
+        self.assertEqual(report.deferred, 3)
 
     def test_per_pass_cap_still_applies_on_top(self):
         news = [self._cand(f"n{i}", 4) for i in range(6)]
@@ -267,3 +295,143 @@ class Allocation(unittest.TestCase):
         ids, report = self._allocate([], reminded_today=set())
         self.assertEqual(ids, [])
         self.assertEqual(report.deferred, 0)
+
+
+class DailyCounterSelfResets(unittest.TestCase):
+    """
+    The daily cap is backed by a per-item counter dated by that item's own
+    Last Reminded stamp. That is what lets it reset at midnight with no
+    cleanup job and no global counter row -- but only if the pipeline
+    RESETS to 1 on a new day instead of incrementing forever.
+    """
+
+    def _run(self, last_reminded, reminders_today):
+        page = {"id": "page-1"}
+        item = dict(ITEM, last_reminded=last_reminded, reminders_today=reminders_today)
+        with (
+            mock.patch.object(pipeline, "notion_client") as nc,
+            mock.patch.object(pipeline, "calendar_client"),
+            mock.patch.object(pipeline, "state") as st,
+            mock.patch.object(pipeline, "reminders") as rm,
+            mock.patch.object(pipeline, "notify", return_value=True),
+        ):
+            nc.get_all_items.return_value = [page]
+            nc.extract_fields.return_value = item
+            st.needs_sync.return_value = False
+            cadence = mock.Mock(max_per_pass=3, daily_budget=6, load_scale=1.0)
+            cadence.for_load.return_value = cadence
+            rm.Cadence.from_env.return_value = cadence
+            rm.due_for_reminder.return_value = REMINDER
+            pipeline.run_sync_pass("test", send_reminders=True)
+            return nc.mark_reminded.call_args
+
+    def test_increments_when_the_previous_reminder_was_today(self):
+        now = timeutil.now()
+        args = self._run(now.isoformat(), 2)
+        self.assertEqual(args[0][2], 3)
+
+    def test_resets_to_one_when_the_previous_reminder_was_yesterday(self):
+        """Without this the counter grows forever and the cap locks the
+        system silent after one busy day."""
+        stale = (timeutil.now() - timedelta(days=1)).isoformat()
+        args = self._run(stale, 5)
+        self.assertEqual(args[0][2], 1)
+
+    def test_resets_when_there_is_no_previous_reminder(self):
+        args = self._run(None, 0)
+        self.assertEqual(args[0][2], 1)
+
+
+class LoadScaling(unittest.TestCase):
+    def test_cadence_is_scaled_for_the_active_workload(self):
+        pages = [{"id": f"p{i}"} for i in range(12)]
+        with (
+            mock.patch.object(pipeline, "notion_client") as nc,
+            mock.patch.object(pipeline, "calendar_client"),
+            mock.patch.object(pipeline, "state") as st,
+            mock.patch.object(pipeline, "reminders") as rm,
+            mock.patch.object(pipeline, "notify", return_value=True),
+        ):
+            nc.get_all_items.return_value = pages
+            nc.extract_fields.side_effect = [
+                dict(ITEM, id=f"p{i}", is_complete=False, type_name="Assignments")
+                for i in range(12)
+            ]
+            st.needs_sync.return_value = False
+            cadence = mock.Mock(max_per_pass=3, daily_budget=6, load_scale=1.0)
+            cadence.for_load.return_value = cadence
+            rm.Cadence.from_env.return_value = cadence
+            rm.due_for_reminder.return_value = None
+            pipeline.run_sync_pass("test", send_reminders=True)
+            cadence.for_load.assert_called_once_with(12)
+
+    def test_completed_items_do_not_inflate_the_load(self):
+        pages = [{"id": f"p{i}"} for i in range(5)]
+        with (
+            mock.patch.object(pipeline, "notion_client") as nc,
+            mock.patch.object(pipeline, "calendar_client"),
+            mock.patch.object(pipeline, "state") as st,
+            mock.patch.object(pipeline, "reminders") as rm,
+            mock.patch.object(pipeline, "notify", return_value=True),
+        ):
+            nc.get_all_items.return_value = pages
+            nc.extract_fields.side_effect = [
+                dict(ITEM, id=f"p{i}", is_complete=(i >= 2), type_name="Assignments")
+                for i in range(5)
+            ]
+            st.needs_sync.return_value = False
+            cadence = mock.Mock(max_per_pass=3, daily_budget=6, load_scale=1.0)
+            cadence.for_load.return_value = cadence
+            rm.Cadence.from_env.return_value = cadence
+            rm.due_for_reminder.return_value = None
+            pipeline.run_sync_pass("test", send_reminders=True)
+            cadence.for_load.assert_called_once_with(2)
+
+
+class QuietHoursDoNotPoisonTheDailyBudget(unittest.TestCase):
+    """
+    Regression, caught in simulation 2026-07-30 before it ever shipped to
+    the phone. A silent quiet-hours consume moves Last Reminded forward,
+    and Last Reminded is what dates the daily counter. If the counter
+    isn't rewritten at the same time, yesterday's total is carried into
+    today and the day opens with a phantom spent budget.
+
+    Quiet hours run every night, so this poisoned every morning: a
+    simulated week went from 41 notifications to 7.
+    """
+
+    def _run(self, last_reminded, reminders_today):
+        page = {"id": "page-1"}
+        item = dict(ITEM, last_reminded=last_reminded, reminders_today=reminders_today)
+        with (
+            mock.patch.object(pipeline, "notion_client") as nc,
+            mock.patch.object(pipeline, "calendar_client"),
+            mock.patch.object(pipeline, "state") as st,
+            mock.patch.object(pipeline, "reminders") as rm,
+            mock.patch.object(pipeline, "notify", return_value=True) as nf,
+        ):
+            nc.get_all_items.return_value = [page]
+            nc.extract_fields.return_value = item
+            st.needs_sync.return_value = False
+            cadence = mock.Mock(max_per_pass=3, daily_budget=6, load_scale=1.0)
+            cadence.for_load.return_value = cadence
+            rm.Cadence.from_env.return_value = cadence
+            rm.due_for_reminder.return_value = replace(REMINDER, silent=True)
+            pipeline.run_sync_pass("test", send_reminders=True)
+            nf.assert_not_called()
+            return nc.mark_reminded.call_args
+
+    def test_silent_consume_on_a_new_day_zeroes_the_counter(self):
+        yesterday = (timeutil.now() - timedelta(days=1)).isoformat()
+        args = self._run(yesterday, 5)
+        self.assertEqual(args[0][2], 0)
+
+    def test_silent_consume_preserves_todays_real_count(self):
+        """Within the same day the count must NOT be cleared -- those
+        notifications really were delivered and really did spend budget."""
+        args = self._run(timeutil.now().isoformat(), 3)
+        self.assertEqual(args[0][2], 3)
+
+    def test_silent_consume_never_increments(self):
+        args = self._run(timeutil.now().isoformat(), 2)
+        self.assertNotEqual(args[0][2], 3)
