@@ -46,6 +46,13 @@ COMPLETE_STATUSES = {"Done"}
 # Property that holds the capture dedup key. See create_item().
 EXTERNAL_ID_PROP = "External ID"
 
+# "What is this for?" — a class, or a non-class context like Personal or
+# Work. Renamed from "Class" 2026-07-30 (the rename preserved every
+# existing value; verified against all 15 live pages). See
+# shared/classmap.py for why non-class options must never be matched
+# against automatically.
+CATEGORY_PROP = "For"
+
 MAX_ATTEMPTS = 5
 
 
@@ -163,7 +170,7 @@ def get_last_reminded(page_id: str) -> str | None:
 
 def create_item(
     name: str,
-    class_name: str | None,
+    category: str | None,
     due_date: str | None,
     source: str,
     type_name: str = "Assignments",
@@ -172,7 +179,9 @@ def create_item(
     """
     Used by the Gmail and Classroom sweeps to add an item Peter hasn't
     typed in himself. `source` goes into "Input Type"; `type_name` goes
-    into "Type".
+    into "Type"; `category` goes into "For" and must already be one of
+    that property's existing options (see classmap.resolve — Notion
+    silently creates any option it is handed).
 
     `external_id` is the capture dedup key — a stable identifier for the
     upstream thing this item came from ("gmail:<message_id>",
@@ -187,7 +196,7 @@ def create_item(
     """
     properties = {
         "Title": {"title": [{"text": {"content": name}}]},
-        "Class": {"select": {"name": class_name}} if class_name else None,
+        CATEGORY_PROP: {"select": {"name": category}} if category else None,
         "Status": {"status": {"name": "Not Started"}},
         "Input Type": {"select": {"name": source}},
         "Type": {"select": {"name": type_name}},
@@ -275,7 +284,12 @@ def extract_fields(page: dict) -> dict:
         "id": page["id"],
         "url": page.get("url"),
         "name": _title(props.get("Title")),
-        "class_name": _select(props.get("Class")),
+        # "For" was called "Class" until 2026-07-30. The fallback is not
+        # migration cruft — Peter edits this schema by hand in the Notion
+        # UI between sessions, and this project has already had a
+        # property come back under its old (typo'd) name that way. Read
+        # both; a missing category degrades to a blank field, not a crash.
+        "category": _select(props.get(CATEGORY_PROP) or props.get("Class")),
         "type_name": _select(props.get("Type")),
         "priority": _select(props.get("Priority")),
         "due_date": _date(props.get("Due Date")),

@@ -237,7 +237,7 @@ def run(known_ids: set[str] | None = None):
 
     # Read once: Notion invents any select option it's handed, so course
     # names are matched against what already exists rather than sent raw.
-    class_options = notion_client.select_option_names("Class")
+    category_options = notion_client.select_option_names(notion_client.CATEGORY_PROP)
 
     added = skipped = submitted = unmatched = 0
     capped = False
@@ -251,12 +251,12 @@ def run(known_ids: set[str] | None = None):
             continue
 
         already_submitted = _submitted_coursework_ids(service, course_id)
-        class_name = classmap.resolve(course.get("name"), class_options)
-        if course.get("name") and class_name is None:
+        category = classmap.resolve(course.get("name"), category_options)
+        if course.get("name") and category is None:
             unmatched += 1
             print(
-                f"[classroom_scan] no Notion Class option matches "
-                f"{course.get('name')!r} — importing with Class left blank. "
+                f"[classroom_scan] no Notion For option matches "
+                f"{course.get('name')!r} — importing with For left blank. "
                 f"Add the option in Notion, or set CLASS_ALIASES.",
                 file=sys.stderr,
             )
@@ -283,7 +283,7 @@ def run(known_ids: set[str] | None = None):
 
             notion_client.create_item(
                 name=work["title"],
-                class_name=class_name,
+                category=category,
                 due_date=_due_date_iso(work),
                 source="Classroom",
                 type_name="Assignments",

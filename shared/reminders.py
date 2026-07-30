@@ -383,7 +383,15 @@ class Reminder:
     title: str
     body: str
     priority: int = 3  # ntfy priority, 1-5
-    tags: str = "school"
+    # ntfy converts any tag matching an emoji short code into an emoji and
+    # PREPENDS it to the title. The old default of "school" therefore put
+    # a 🏫 on the front of every single notification — verified against
+    # ntfy's own emoji table 2026-07-30, after polling the live topic and
+    # finding the tag on all 9 cached messages. It carried no information
+    # (everything here is school) and it crowded out the category emoji
+    # that does. Default is now no tags at all; "rotating_light" (🚨) is
+    # added back only where urgency is real.
+    tags: str = ""
 
 
 _CATEGORY_LABELS = {
@@ -398,14 +406,14 @@ _CATEGORY_LABELS = {
 }
 
 
-def _title(type_name: str, kind: str, class_name: str | None) -> str:
+def _title(type_name: str, kind: str, category: str | None) -> str:
     label = _CATEGORY_LABELS.get((type_name, kind), "Reminder")
-    emoji = classmap.class_emoji(class_name)
+    emoji = classmap.category_emoji(category, type_name)
     return f"{emoji} {label}" if emoji else label
 
 
-def _body(class_name: str | None, name: str, suffix: str) -> str:
-    prefix = f"{class_name} · " if class_name else ""
+def _body(category: str | None, name: str, suffix: str) -> str:
+    prefix = f"{category} · " if category else ""
     return f"{prefix}{name} — {suffix}" if suffix else f"{prefix}{name}"
 
 
@@ -433,7 +441,7 @@ def due_for_reminder(
 
     effective = now - lag
     type_name = item.get("type_name")
-    class_name = item.get("class_name")
+    category = item.get("category")
     name = item["name"]
     raw_due = item.get("due_date")
     due = due_datetime(item)
@@ -463,8 +471,8 @@ def due_for_reminder(
                 return None  # typed by hand just now — let local_sync go first
         due_phrase = f"due {_friendly_due(due, has_time)}" if due else ""
         return Reminder(
-            title=_title(type_name, "capture", class_name),
-            body=_body(class_name, name, due_phrase),
+            title=_title(type_name, "capture", category),
+            body=_body(category, name, due_phrase),
         )
 
     if type_name == "Events":
@@ -481,12 +489,12 @@ def due_for_reminder(
         hour_before = due - timedelta(hours=1)
         if has_time and hour_before <= effective < due and last_reminded < hour_before:
             return Reminder(
-                title=_title(type_name, "reminder", class_name),
+                title=_title(type_name, "reminder", category),
                 body=_body(
-                    class_name, name, f"starts in 1 hour ({_friendly_due(due, has_time)})"
+                    category, name, f"starts in 1 hour ({_friendly_due(due, has_time)})"
                 ),
                 priority=4,
-                tags="school,rotating_light",
+                tags="rotating_light",
             )
 
         if effective >= due:
@@ -504,8 +512,8 @@ def due_for_reminder(
             )
             if effective >= marker and last_reminded < marker:
                 return Reminder(
-                    title=_title(type_name, "reminder", class_name),
-                    body=_body(class_name, name, relative_due(due, has_time, effective)),
+                    title=_title(type_name, "reminder", category),
+                    body=_body(category, name, relative_due(due, has_time, effective)),
                     priority=4 if days_before == 0 else 3,
                 )
         return None
@@ -523,8 +531,8 @@ def due_for_reminder(
     verb = "was due" if overdue else "due"
     priority = 5 if overdue else (4 if days_until < 1 else 3)
     return Reminder(
-        title=_title(type_name, "overdue" if overdue else "reminder", class_name),
-        body=_body(class_name, name, f"{verb} {relative_due(due, has_time, effective)}"),
+        title=_title(type_name, "overdue" if overdue else "reminder", category),
+        body=_body(category, name, f"{verb} {relative_due(due, has_time, effective)}"),
         priority=priority,
-        tags="school,rotating_light" if priority >= 4 else "school",
+        tags="rotating_light" if priority >= 4 else "",
     )

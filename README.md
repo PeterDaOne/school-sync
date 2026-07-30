@@ -254,7 +254,7 @@ The test cases use only the standard library — no pytest — but they
 import the real modules, which need `requirements.txt` installed
 (`notion_client` imports `requests`). They cover the reminder cadence
 engine, timezone handling, sync-state tracking, Notion field
-extraction, and Classroom→Notion class matching. They also run on every
+extraction, and Classroom→Notion category matching. They also run on every
 push via GitHub Actions and gate the scheduled sync, so a cadence bug
 can't reach your phone.
 
@@ -320,7 +320,15 @@ Key ideas worth knowing before you change anything:
 - The "Mark done" button's tap effect is near-instant, but the Notion
   page doesn't actually flip to Done until the next sync pass notices
   the command — up to ~2 min locally, ~10 min from the cloud alone.
-- `shared/classmap.py`'s `CLASS_EMOJI` dict is keyed by exact Notion
-  Class option names. Rename a class in Notion and that class silently
-  loses its emoji (title still works fine, just plain) until the dict
-  is updated to match.
+- `shared/classmap.py`'s `CATEGORY_EMOJI` dict is keyed by exact Notion
+  `For` option names. Rename an option in Notion and it silently falls
+  back to its Type emoji (📝/☑️/📅 — the title still works, it just
+  stops being class-specific) until the dict is updated to match.
+- **Adding a new non-class option to `For` requires a code edit.** Put
+  it in `classmap.NON_CLASS_CATEGORIES` too, or the Classroom capture
+  sweep can fuzzy-match a course name onto it — "Personal Finance" would
+  land under "Personal". There is no way to tell a class from a life
+  category by looking at the string, so the list is explicit.
+- ntfy tags are **not** invisible metadata: a tag matching an emoji
+  short code is rendered as an emoji and prepended to the title. Adding
+  a decorative tag changes how every notification looks.

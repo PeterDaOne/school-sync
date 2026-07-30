@@ -1,5 +1,5 @@
 """
-Matching Google Classroom course names to Peter's Notion `Class` options.
+Matching Google Classroom course names to Peter's Notion `For` options.
 
 WHY THIS EXISTS
 ---------------
@@ -12,8 +12,23 @@ Statistics work under one name and half under the other. That failure is
 invisible until it has already made a mess.
 
 So: match against the options that already exist, and when nothing
-matches confidently, leave `Class` empty. An unset field is obvious and
+matches confidently, leave `For` empty. An unset field is obvious and
 takes two seconds to fix. A near-duplicate option is neither.
+
+`For` USED TO BE `Class` (renamed 2026-07-30)
+---------------------------------------------
+The property answers "what is this for?", not "which class is this" —
+its options are Peter's 8 classes PLUS non-class contexts (School,
+Personal, Friends, Work) for the many items that are real commitments
+but belong to no course.
+
+That expansion creates a failure mode this module has to defend
+against: resolve() fuzzy-matches, so once "Personal" is a valid option,
+a Classroom course named "Personal Finance" can match it, and a course
+named "Work Experience" can match "Work". A capture sweep would then
+file real homework under a life category. NON_CLASS_CATEGORIES is
+excluded from matching for exactly that reason — those four are
+manual-entry-only, and nothing automated should ever select them.
 
 This module is pure — no network, no Notion — which is why it's testable
 and separate from notion_client.
@@ -80,8 +95,14 @@ def resolve(course_name: str | None, options: list[str]) -> str | None:
     Best existing Notion option for a Classroom course name, or None.
 
     Returning None is a real answer, not a failure — it means "leave the
-    Class field empty rather than invent an option".
+    For field empty rather than invent an option".
+
+    NON_CLASS_CATEGORIES are filtered out before matching: they are
+    Peter's own life categories, not courses, and a fuzzy matcher handed
+    "Personal Finance" would happily file it under "Personal". Automated
+    capture may only ever choose a class.
     """
+    options = [o for o in options if o not in NON_CLASS_CATEGORIES]
     if not course_name or not options:
         return None
 
@@ -129,11 +150,17 @@ def resolve(course_name: str | None, options: list[str]) -> str | None:
     return best_option
 
 
+# The non-course options of `For`. Kept as a frozenset rather than
+# inferred (there is no way to tell a class from a life category by
+# looking at the string) — if Peter adds another category in the Notion
+# UI, it belongs here too, or capture may start matching against it.
+NON_CLASS_CATEGORIES = frozenset({"School", "Personal", "Friends", "Work"})
+
 # Keyed by the LIVE Notion option name, not a corrected spelling — Notion
-# matches on exact string, so "AP Psycology" (verified via curl 2026-07-28)
+# matches on exact string, so "AP Psycology" (verified via curl 2026-07-30)
 # has to be the key until Peter renames the option itself. If he does,
 # this dict needs the matching edit or that class silently loses its emoji.
-CLASS_EMOJI = {
+CATEGORY_EMOJI = {
     "AP US History": "🏛️",
     "AP Psycology": "🧠",
     "AP Studio Art": "🎨",
@@ -142,9 +169,30 @@ CLASS_EMOJI = {
     "AP Stats": "📊",
     "AP Lang": "✍️",
     "Leadership": "🧭",
+    # Non-class categories (added 2026-07-30 alongside the Class -> For
+    # rename). "School" reclaims the 🏫 that used to be prepended to
+    # every single notification by the ntfy `school` tag, where it meant
+    # nothing; here it distinguishes general school business from a
+    # specific course.
+    "School": "🏫",
+    "Personal": "👤",
+    "Friends": "🤝",
+    "Work": "💼",
+}
+
+# Fallback when an item has no `For` at all, so a categoryless item still
+# gets a glyph instead of a bare text title sitting next to its
+# neighbours' emoji. Keyed by Notion's `Type`.
+TYPE_EMOJI = {
+    "Assignments": "📝",
+    "Tasks": "☑️",
+    "Events": "📅",
 }
 
 
-def class_emoji(name: str | None) -> str:
-    """Emoji for a canonical Class option name, or "" if unset/unknown."""
-    return CLASS_EMOJI.get(name or "", "")
+def category_emoji(name: str | None, type_name: str | None = None) -> str:
+    """
+    Emoji for a canonical `For` option name, falling back to the item's
+    Type, then to "" if neither is known.
+    """
+    return CATEGORY_EMOJI.get(name or "") or TYPE_EMOJI.get(type_name or "", "")

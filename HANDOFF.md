@@ -13,9 +13,9 @@ one-item-at-a-time after it.
 Keep this file current. It is the fast path back into the project after a
 context reset, and a stale handoff is worse than none: it will be trusted.
 
-Last updated: 2026-07-29, built on commit 38fb2dd — this session's
-changes (reminder cadence rewrite + mark-done button) are about to be
-committed on top of it; check `git log -1` for the real current hash.
+Last updated: 2026-07-30, built on commit 5e81a19 — this session's
+changes (`Class` -> `For` category rename + ntfy tag fix) are about to
+be committed on top of it; check `git log -1` for the real current hash.
 
 ---
 
@@ -29,8 +29,8 @@ the last session and is accurate. Don't rediscover what's already there.
 
 ## Where things actually stand
 
-Repo: https://github.com/PeterDaOne/school-sync (public). 171
-stdlib-unittest tests (up from 115 this session), green locally and in
+Repo: https://github.com/PeterDaOne/school-sync (public). 190
+stdlib-unittest tests (up from 171 this session), green locally and in
 CI. launchd job loaded and healthy under the new code.
 
 **Verified working against real data:** the whole cloud path (secrets,
@@ -50,68 +50,87 @@ session — the ENTIRE rewritten cadence and message system, live:
 - Two consecutive local_sync passes ran clean after reloading launchd
   with the new code + regenerated plist.
 
+**Also verified live 2026-07-30:** the `For` rename preserved every
+value on all 15 real pages; the notification title/body renders
+correctly for all 10 live incomplete items; three real ntfy sends came
+back with the new emoji intact and the `Tags` header correctly ABSENT;
+both entrypoints ran clean end to end; launchd reloaded and fired.
+
 **Written but NEVER run against real data:** the mark-done button itself
 (NTFY_COMMAND_TOPIC isn't set up yet — that's a step only Peter can do,
 same pattern as every other secret this project has needed). The whole
-capture layer (gmail_scan.py, classroom_scan.py) — unchanged this
-session, still the largest untested surface in the project; four bugs
-were found in it by code-tracing alone, assume more exist.
+capture layer (gmail_scan.py, classroom_scan.py) — its `For` call sites
+were updated and the non-class-category exclusion is unit-tested against
+the live option list, but neither sweep has still ever created a real
+item; four bugs were found in it by code-tracing alone, assume more
+exist.
 
 ## Nothing is blocking (see the agenda below for what's next)
 
-## What just shipped (this session, 2026-07-29)
+## What just shipped (this session, 2026-07-30)
 
-Three things, in priority order Peter set:
+Agenda items 0 and 1 of the previous session's plan. Items 2, 3 and 4
+(scenario design, capture-layer audit, productivity assessment) were NOT
+started and carry forward.
 
-1. **Cron latency** (~110min → sub-6min) — external dispatch scheduler,
-   already covered in a previous handoff, unchanged since.
-2. **Reminder cadence + message rewrite** — the three fixed tiers
-   (24h/4h/2h) became a continuous formula (see CLAUDE.md's "Reminder
-   engine" section for the exact math) because same-tier items stayed
-   phase-locked together forever, causing real observed bursts (5
-   pushes in 8 seconds). Priority (High/Medium/Low) is now read and
-   actually affects cadence — it was a Notion column nothing looked at
-   before. Deterministic per-item jitter + a per-pass cap break up
-   bursts. Messages got a full redesign: category + class emoji in the
-   ntfy Title, relative time ("due tomorrow at 3pm", "in 3 days") in the
-   body instead of an absolute date, urgency-scaled ntfy priority/tags.
-3. **"Mark done" notification button** — via a SECOND ntfy topic
-   (NTFY_COMMAND_TOPIC) as a write-only command queue, specifically so
-   no Notion credential ever has to live inside a notification. Every
-   sync pass polls it and marks the referenced page Done; no dedup
-   cursor needed since marking Done twice is a no-op.
+1. **Loose-end triage, with the assumptions actually measured.** The
+   external dispatch scheduler is healthy: 37 runs, gaps 4.9/5.0/5.1 min
+   (min/avg/max) — the PAT is alive. The `schedule` cron delivered 2 runs
+   in the same ~1.8 hours, still ~1/hour. And GitHub's 60-day
+   auto-disable was checked against the real docs rather than assumed:
+   it disables **only the `schedule` trigger**, not `workflow_dispatch`.
+   So a keepalive protects only the already-degraded fallback — low
+   value on its own. The combination is what matters: schedule
+   auto-disables ~Sept 28 (60 days from last repo activity), the PAT
+   expires ~Oct 27, and after that BOTH cloud paths are dead at once,
+   silently, mid-semester. Setting cron-job.org's failure notification
+   is the cheap alarm; it is the one genuinely time-sensitive item.
+
+2. **`Class` -> `For`, expanded to "what is this for?"** — Peter's call.
+   Options are now his 8 classes plus School / Personal / Friends /
+   Work, so real commitments that belong to no course stop being
+   categoryless. Notion property rename via the API, values preserved
+   (verified on all 15 pages). Internal key is `category`; a fallback
+   read of the old `Class` name guards against hand-editing. The
+   important part is `classmap.NON_CLASS_CATEGORIES`: the capture
+   resolver fuzzy-matches, so "Personal Finance" would otherwise file
+   homework under "Personal" — those four options are excluded from
+   matching entirely and are manual-entry-only.
+
+3. **The 🏫 nobody knew about.** Polling the live ntfy topic (rather than
+   reading the code) showed ntfy renders any tag matching an emoji short
+   code and prepends it to the Title. The default tag was `school` = 🏫,
+   so every notification really read `🏫✍️ Assignment reminder`, and
+   `🏫🚨✍️ ...` when urgent. Tags now default to empty and the header is
+   omitted entirely; `rotating_light` stays only where urgency is real.
+   🏫 was reused as the "School" category emoji, where it means
+   something. Type-fallback emoji (📝/☑️/📅) added so a categoryless item
+   isn't the one bare text title among emoji.
+
+**Still true from 2026-07-29:** the continuous cadence formula, the
+message redesign, and the mark-done button all shipped then and are
+unchanged.
 
 **What Peter needs to do next, when ready:** set up NTFY_COMMAND_TOPIC
-(README "Mark done" section has the exact steps — pick a second random
-topic, add to .env, regenerate the plist, add as an optional GitHub
-secret) and then tap a real button on a real notification to confirm
-the whole loop end to end. Until then the button is silently absent
-from every notification (by design — see build_mark_done_action in
-shared/notify.py), nothing else is affected.
+(README "Mark done" section has the exact steps) and tap a real button
+on a real notification. Until then the button is silently absent from
+every notification (by design), nothing else is affected. Separately:
+turn on cron-job.org's "notify me when execution fails".
+
+**Noted, not fixed:** `README.md` lines 7-8 carry the real Notion
+database id on a public repo. Not a credential (unusable without the
+integration token) and it's his own documentation link, so it was left
+alone — but `.env.example` was carrying it too, which is just wrong for
+a `.example` file, and that one was replaced with a placeholder.
 
 ## What I want to do this session, in order
 
-The notification system was just rewritten and is working well — I'm
-happy with it. Treat it as a good baseline to refine, not a problem to
-solve.
+Carried over from 2026-07-30, which finished items 0 and 1 and never
+started these. The ordering note still applies: 2 comes before 3
+because defining scenario behavior will change what I want out of the
+capture layer, and if the session runs short, push 3 rather than 4.
 
-**0. First, check the loose ends above and tell me which actually
-matter.** There are several deferred items (NTFY_COMMAND_TOPIC not set
-up yet so the mark-done button is absent, the GitHub Actions keepalive
-before workflows auto-disable in late September, the cron-job.org PAT
-expiring ~2026-10-27 with a silent failure mode, the gmail.modify OAuth
-re-consent, ANTHROPIC_API_KEY still a placeholder). Don't just list them
-back at me — tell me which are genuinely worth doing now vs. which can
-wait, and flag anything time-sensitive I'd regret missing.
-
-**1. Small tweaks to how notifications look on the lock screen.** Minor
-only. Right now: ntfy Title = category + class emoji ("📊 Assignment
-overdue"), body = "Class · Name — relative time". Show me what a few
-real notifications currently look like end to end (poll ntfy directly,
-don't just read the code), then propose small refinements. I'll tell you
-what to change from there.
-
-**2. Define how the workflow should behave for specific scenarios.**
+**1. Define how the workflow should behave for specific scenarios.**
 This is a design conversation before any code. I want to walk through
 real situations — what happens when I add something last-minute, when
 something's overdue for a week, when I have five things due the same
@@ -119,8 +138,18 @@ day, when I mark something done from my phone mid-class, etc. — and
 decide what the system SHOULD do in each. Ask me about the scenarios
 that matter rather than assuming.
 
-**3. Test and audit the capture layer** (gmail_scan.py,
-classroom_scan.py). This is the largest untested surface in the project:
+One concrete input for that conversation, observed live 2026-07-30:
+**the quiet-hours release is still a burst.** Three notifications landed
+at 05:00:48, :49 and :50 — one second apart. MAX_NOTIFICATIONS_PER_PASS
+capped the count at 3, but jitter can't separate them because they
+weren't phase-locked, they were all *held* overnight and released in the
+same pass. That's a different problem from the one the jitter solved,
+and it's a scenario worth deciding on deliberately. Related: the same
+item ("The Odessy") fired 4x in one day with byte-identical text — no
+escalation, no sense of "this is the 4th time".
+
+**2. Test and audit the capture layer** (gmail_scan.py,
+classroom_scan.py). Still the largest untested surface in the project:
 written, never run against real data, and four bugs were already found
 in it by code-tracing alone — assume more exist.
 
@@ -133,20 +162,17 @@ in it by code-tracing alone — assume more exist.
    meaningfully test without those, what needs me to provide something
    first, and what it'd take to test it properly.
 
-**4. Then step back and assess the whole system as a productivity tool,
+   Note: don't push me to buy the Anthropic key before item 3 decides
+   whether Gmail capture earns its place. Paying to unblock a feature
+   that might get deleted is backwards.
+
+**3. Then step back and assess the whole system as a productivity tool,
 not as code.** This is the part I care most about. Does this actually
 propel me toward my goals, or is it just technically impressive? What
 should change, get added, or get REMOVED to make it more effective? Be
 honest — if something is over-engineered, unused, or actively creating
 noise rather than reducing it, say so. I'd rather hear "this feature
 isn't earning its place" than have you defend everything that exists.
-
-**Ordering note:** 1 and 2 come before 3 and 4 on purpose. Defining the
-scenario behavior (2) will likely change what I want out of the capture
-layer, so testing it first means auditing against a spec that's about to
-move. And if the session starts running out of room, push item 3, not
-item 4 — capture-layer auditing is open-ended, and "is this actually
-helping me" is the better use of a session.
 
 ## Ground rules that were earned the hard way
 

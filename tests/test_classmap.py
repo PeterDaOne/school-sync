@@ -121,7 +121,7 @@ class Aliases(unittest.TestCase):
         self.assertEqual(classmap.resolve("AP Stats", OPTIONS), "AP Stats")
 
 
-class ClassEmoji(unittest.TestCase):
+class CategoryEmoji(unittest.TestCase):
     def test_every_live_option_has_an_emoji(self):
         """
         Every canonical name Resolve can return should have an emoji, or
@@ -129,18 +129,72 @@ class ClassEmoji(unittest.TestCase):
         class with no error anywhere.
         """
         for option in OPTIONS:
-            self.assertNotEqual(classmap.class_emoji(option), "", option)
+            self.assertNotEqual(classmap.category_emoji(option), "", option)
 
     def test_unknown_class_returns_empty_not_a_placeholder(self):
-        self.assertEqual(classmap.class_emoji("Marching Band"), "")
+        self.assertEqual(classmap.category_emoji("Marching Band"), "")
 
     def test_none_returns_empty(self):
-        self.assertEqual(classmap.class_emoji(None), "")
+        self.assertEqual(classmap.category_emoji(None), "")
 
     def test_misspelled_live_option_still_resolves(self):
         # The dict is keyed by the LIVE (misspelled) Notion option name
         # on purpose -- resolve() would hand this exact string back.
-        self.assertEqual(classmap.class_emoji("AP Psycology"), "🧠")
+        self.assertEqual(classmap.category_emoji("AP Psycology"), "🧠")
+
+    def test_non_class_categories_have_emoji(self):
+        for name in classmap.NON_CLASS_CATEGORIES:
+            self.assertNotEqual(classmap.category_emoji(name), "", name)
+
+    def test_falls_back_to_type_when_category_unset(self):
+        """A categoryless item still gets a glyph, so it doesn't sit in the
+        notification list as the one bare text title among emoji."""
+        self.assertEqual(classmap.category_emoji(None, "Tasks"), "☑️")
+        self.assertEqual(classmap.category_emoji("", "Events"), "📅")
+
+    def test_category_wins_over_type_fallback(self):
+        self.assertEqual(classmap.category_emoji("AP Lang", "Assignments"), "✍️")
+
+    def test_unknown_category_and_unknown_type_is_empty(self):
+        self.assertEqual(classmap.category_emoji("Marching Band", "Nonsense"), "")
+
+
+# The `For` property holds Peter's classes AND his life categories
+# (School / Personal / Friends / Work). Automated capture must never
+# select one of the latter: a fuzzy matcher handed a real course name
+# will otherwise file homework under a life category, silently and
+# permanently. These are the cases that motivated the exclusion.
+CATEGORY_OPTIONS = OPTIONS + ["School", "Personal", "Friends", "Work"]
+
+
+class NonClassCategoriesAreNeverAutoSelected(unittest.TestCase):
+    def r(self, name):
+        return classmap.resolve(name, CATEGORY_OPTIONS)
+
+    def test_personal_finance_course_does_not_match_personal(self):
+        self.assertNotEqual(self.r("Personal Finance"), "Personal")
+
+    def test_work_experience_course_does_not_match_work(self):
+        self.assertNotEqual(self.r("Work Experience"), "Work")
+
+    def test_exact_category_name_is_still_refused(self):
+        """Even a course literally named "School" must not select it —
+        the exclusion is on the option, not on match confidence."""
+        self.assertIsNone(self.r("School"))
+        self.assertIsNone(self.r("Personal"))
+
+    def test_no_course_name_ever_resolves_to_a_non_class_category(self):
+        for name in ("Personal Finance", "Work Experience", "School of Rock",
+                     "Friends Seminar", "Personal Fitness", "Work Study"):
+            self.assertNotIn(self.r(name), classmap.NON_CLASS_CATEGORIES, name)
+
+    def test_real_classes_still_resolve_alongside_the_categories(self):
+        """The exclusion must not damage the matching it sits next to."""
+        self.assertEqual(self.r("AP Statistics - Period 3"), "AP Stats")
+        self.assertEqual(self.r("AP Lang"), "AP Lang")
+
+    def test_only_categories_available_means_no_match(self):
+        self.assertIsNone(classmap.resolve("AP Stats", ["School", "Personal"]))
 
 
 if __name__ == "__main__":

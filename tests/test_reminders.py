@@ -42,7 +42,7 @@ def item(**overrides) -> dict:
         "id": "page-1",
         "name": "Algebra Work",
         "type_name": "Assignments",
-        "class_name": None,
+        "category": None,
         "priority": None,
         "due_date": "2026-08-26",
         "is_complete": False,
@@ -261,7 +261,7 @@ class CaptureNotification(unittest.TestCase):
         r = reminders.due_for_reminder(
             item(last_reminded=None), at("2026-07-28T09:00"), cadence=CADENCE
         )
-        self.assertEqual(r.title, "New assignment")
+        self.assertEqual(r.title, "📝 New assignment")
         self.assertEqual(r.body, "Algebra Work — due Aug 26")
 
     def test_includes_time_when_due_date_has_one(self):
@@ -282,22 +282,22 @@ class CaptureNotification(unittest.TestCase):
         r = reminders.due_for_reminder(
             item(last_reminded=None, type_name="Tasks"), at("2026-07-28T09:00"), cadence=CADENCE
         )
-        self.assertEqual(r.title, "New task")
+        self.assertEqual(r.title, "☑️ New task")
 
     def test_class_adds_an_emoji_to_the_title_and_a_prefix_to_the_body(self):
         r = reminders.due_for_reminder(
-            item(last_reminded=None, class_name="AP Stats"),
+            item(last_reminded=None, category="AP Stats"),
             at("2026-07-28T09:00"),
             cadence=CADENCE,
         )
         self.assertEqual(r.title, "📊 New assignment")
         self.assertTrue(r.body.startswith("AP Stats · Algebra Work"))
 
-    def test_no_class_means_no_emoji_and_no_dangling_separator(self):
+    def test_no_category_means_type_emoji_and_no_dangling_separator(self):
         r = reminders.due_for_reminder(
-            item(last_reminded=None, class_name=None), at("2026-07-28T09:00"), cadence=CADENCE
+            item(last_reminded=None, category=None), at("2026-07-28T09:00"), cadence=CADENCE
         )
-        self.assertEqual(r.title, "New assignment")
+        self.assertEqual(r.title, "📝 New assignment")
         self.assertFalse(r.body.startswith("·"))
         self.assertTrue(r.body.startswith("Algebra Work"))
 
@@ -359,7 +359,7 @@ class RecurringReminders(unittest.TestCase):
             now,
             cadence=CADENCE,
         )
-        self.assertEqual(r.title, "Assignment reminder")
+        self.assertEqual(r.title, "📝 Assignment reminder")
         self.assertEqual(r.body, "Algebra Work — due today at 9:00 AM")
         self.assertEqual(r.priority, 4)
 
@@ -373,7 +373,7 @@ class RecurringReminders(unittest.TestCase):
             now,
             cadence=CADENCE,
         )
-        self.assertEqual(r.title, "Assignment overdue")
+        self.assertEqual(r.title, "📝 Assignment overdue")
         self.assertEqual(r.body, "Algebra Work — was due 3 days ago")
         self.assertEqual(r.priority, 5)
 
@@ -440,7 +440,7 @@ class EventReminders(unittest.TestCase):
             at("2026-08-04T07:00"),
             cadence=CADENCE,
         )
-        self.assertEqual(r.title, "Event reminder")
+        self.assertEqual(r.title, "📅 Event reminder")
         self.assertEqual(r.body, "Prom — in 3 days")
         self.assertEqual(r.priority, 3)
 
@@ -470,7 +470,7 @@ class EventReminders(unittest.TestCase):
         )
         self.assertEqual(r.body, "Prom — starts in 1 hour (Aug 7, 7:00 PM)")
         self.assertEqual(r.priority, 4)
-        self.assertEqual(r.tags, "school,rotating_light")
+        self.assertEqual(r.tags, "rotating_light")
 
     def test_hour_before_skipped_for_a_date_only_event(self):
         """A date-only event has no "1 hour before" to compute -- the
@@ -723,3 +723,71 @@ class ConfigParsing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NtfyTagsAreNotDecoration(unittest.TestCase):
+    """
+    ntfy converts a tag matching an emoji short code into an emoji and
+    PREPENDS it to the title. The old default tag "school" therefore put
+    a 🏫 on the front of every notification (confirmed 2026-07-30 by
+    polling the live topic: all 9 cached messages carried it, against
+    ntfy's own emoji table where school -> 🏫). It said nothing —
+    everything in this system is school — and it pushed the category
+    emoji, which does say something, off to the side.
+
+    These pin that no tag is ever emitted for its own sake.
+    """
+
+    def _reminder(self, **kw):
+        return reminders.due_for_reminder(item(**kw), at("2026-08-20T09:00"), cadence=CADENCE)
+
+    def test_school_tag_is_never_emitted(self):
+        for kw in (
+            {"last_reminded": None},                                   # capture
+            {"last_reminded": "2026-08-01T09:00:00-06:00"},            # recurring
+            {"last_reminded": "2026-08-01T09:00:00-06:00",
+             "due_date": "2026-08-01"},                                # overdue
+        ):
+            r = self._reminder(**kw)
+            self.assertIsNotNone(r, kw)
+            self.assertNotIn("school", r.tags, kw)
+
+    def test_routine_reminder_carries_no_tags_at_all(self):
+        r = self._reminder(last_reminded="2026-08-01T09:00:00-06:00")
+        self.assertEqual(r.tags, "")
+
+    def test_overdue_still_flags_urgency(self):
+        r = self._reminder(
+            last_reminded="2026-08-01T09:00:00-06:00", due_date="2026-08-01"
+        )
+        self.assertEqual(r.tags, "rotating_light")
+        self.assertEqual(r.priority, 5)
+
+
+class CategoryEmojiInTitle(unittest.TestCase):
+    def test_class_category_supplies_the_title_emoji(self):
+        r = reminders.due_for_reminder(
+            item(last_reminded=None, category="AP Lang"), at("2026-08-20T09:00"), cadence=CADENCE
+        )
+        self.assertTrue(r.title.startswith("✍️"), r.title)
+
+    def test_non_class_category_supplies_one_too(self):
+        r = reminders.due_for_reminder(
+            item(last_reminded=None, category="Personal", type_name="Tasks"),
+            at("2026-08-20T09:00"),
+            cadence=CADENCE,
+        )
+        self.assertTrue(r.title.startswith("👤"), r.title)
+        self.assertIn("Personal · ", r.body)
+
+    def test_categoryless_item_falls_back_to_its_type_emoji(self):
+        """Regression: a Task with no category used to render a bare
+        "Task reminder" title with no glyph, next to assignments that all
+        had one."""
+        r = reminders.due_for_reminder(
+            item(last_reminded=None, category=None, type_name="Tasks"),
+            at("2026-08-20T09:00"),
+            cadence=CADENCE,
+        )
+        self.assertTrue(r.title.startswith("☑️"), r.title)
+        self.assertNotIn(" · ", r.body)

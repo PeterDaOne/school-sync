@@ -228,7 +228,7 @@ def run(known_ids: set[str] | None = None):
     )
     messages = results.get("messages", [])
 
-    class_options = notion_client.select_option_names("Class")
+    category_options = notion_client.select_option_names(notion_client.CATEGORY_PROP)
     added = skipped = classified = 0
 
     for msg_ref in messages:
@@ -266,7 +266,7 @@ def run(known_ids: set[str] | None = None):
             # Claude can invent a class name that isn't one of Peter's
             # Notion options, and Notion would happily create it. Resolve
             # against the real options or leave it blank.
-            class_name=classmap.resolve(parsed.get("class_name"), class_options),
+            category=classmap.resolve(parsed.get("class_name"), category_options),
             due_date=parsed.get("due_date"),
             source="Email",
             external_id=external_id,

@@ -43,8 +43,10 @@ def notify(
     so it lands in sync-error.log rather than vanishing.
 
     `priority` is ntfy's 1-5 urgency scale; `tags` is ntfy's own
-    comma-separated tag list (some tag names render as an icon —
-    "rotating_light" does); `actions` is a pre-built ntfy `Actions:`
+    comma-separated tag list — note that a tag matching an emoji short
+    code is rendered as an emoji and prepended to the title, so tags are
+    part of how the notification LOOKS, not just metadata ("school" is
+    🏫, "rotating_light" is 🚨); `actions` is a pre-built ntfy `Actions:`
     header value (see build_mark_done_action) — this function stays
     ignorant of what the action does, it just passes the header through.
     """
@@ -53,7 +55,13 @@ def notify(
     # outside it -- passing pre-encoded UTF-8 bytes instead skips that
     # encode step entirely (bytes headers pass through as-is). Confirmed
     # against a real ntfy send: the emoji renders correctly on the phone.
-    headers = {"Title": title.encode("utf-8"), "Tags": tags or "school"}
+    headers = {"Title": title.encode("utf-8")}
+    if tags:
+        # Omitted entirely when empty. ntfy turns any tag matching an
+        # emoji short code into an emoji and prepends it to the title, so
+        # a default tag is not free decoration -- the old default of
+        # "school" put a 🏫 in front of every notification Peter got.
+        headers["Tags"] = tags
     if click_url:
         # Tapping the notification opens this URL — a notion.so page URL
         # is a registered universal link, so this hands off to the Notion

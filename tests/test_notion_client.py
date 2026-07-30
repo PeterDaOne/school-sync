@@ -22,7 +22,7 @@ def page(**overrides) -> dict:
     props = {
         "Title": {"title": [{"plain_text": "Algebra "}, {"plain_text": "Work"}]},
         "Type": {"select": {"name": "Assignments"}},
-        "Class": {"select": {"name": "AP Stats"}},
+        "For": {"select": {"name": "AP Stats"}},
         "Priority": {"select": {"name": "High"}},
         "Status": {"status": {"name": "Not Started"}},
         "Input Type": {"select": {"name": "Classroom"}},
@@ -108,6 +108,25 @@ class ExtractFields(unittest.TestCase):
         # module's, so this must come back as None, not "Medium".
         fields = notion_client.extract_fields(page(properties={"Priority": {"select": None}}))
         self.assertIsNone(fields["priority"])
+
+    def test_reads_the_for_property_as_category(self):
+        self.assertEqual(notion_client.extract_fields(page())["category"], "AP Stats")
+
+    def test_falls_back_to_the_old_class_property_name(self):
+        """Peter edits this schema by hand in the Notion UI between
+        sessions, and a property has already come back under an old name
+        that way once. Reading only "For" would make every item's
+        category silently vanish -- blank notifications, blank Calendar
+        summaries -- with nothing raising."""
+        p = page()
+        del p["properties"]["For"]
+        p["properties"]["Class"] = {"select": {"name": "AP Lang"}}
+        self.assertEqual(notion_client.extract_fields(p)["category"], "AP Lang")
+
+    def test_missing_both_names_is_none_not_a_crash(self):
+        p = page()
+        del p["properties"]["For"]
+        self.assertIsNone(notion_client.extract_fields(p)["category"])
 
 
 class MarkDone(unittest.TestCase):

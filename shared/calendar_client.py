@@ -113,7 +113,7 @@ def upsert_event(item: dict):
 
     start, end = _event_times(item["due_date"])
     body = {
-        "summary": f"{item['class_name'] or 'School'}: {item['name']}",
+        "summary": f"{item['category'] or 'School'}: {item['name']}",
         "start": start,
         "end": end,
         "extendedProperties": {"private": {"notion_id": notion_id}},
