@@ -1,9 +1,14 @@
 # Handoff prompt
 
 Copy the block below into a fresh Claude Code session to bring it up to
-speed on this project. **Trim the "What I want you to work on" section to
-a single item first** — leaving several invites a session that
-half-finishes each one.
+speed on this project.
+
+**Normally: trim the agenda to a single item first** — leaving several
+invites a session that half-finishes each one. The current agenda is a
+deliberate exception: it's one coherent arc (refine → define → test →
+assess) where each step informs the next, and it carries its own
+ordering note about what to drop if time runs short. Go back to
+one-item-at-a-time after it.
 
 Keep this file current. It is the fast path back into the project after a
 context reset, and a stale handoff is worse than none: it will be trusted.
@@ -52,7 +57,7 @@ capture layer (gmail_scan.py, classroom_scan.py) — unchanged this
 session, still the largest untested surface in the project; four bugs
 were found in it by code-tracing alone, assume more exist.
 
-## Nothing is blocking (see "What I want you to work on" for what's next)
+## Nothing is blocking (see the agenda below for what's next)
 
 ## What just shipped (this session, 2026-07-29)
 
@@ -84,23 +89,64 @@ the whole loop end to end. Until then the button is silently absent
 from every notification (by design — see build_mark_done_action in
 shared/notify.py), nothing else is affected.
 
-## What I want you to work on
+## What I want to do this session, in order
 
-[EDIT THIS — pick one, per Peter's stated order:]
+The notification system was just rewritten and is working well — I'm
+happy with it. Treat it as a good baseline to refine, not a problem to
+solve.
 
-1. Testing and auditing the capture layer (gmail_scan.py,
-   classroom_scan.py) against real data — this is explicitly what Peter
-   said comes after the notification rework. Written but never run for
-   real; four known bugs were fixed by code-tracing alone last time,
-   more likely exist. Needs a real Gmail account with real school email
-   and/or a real Classroom course to test against meaningfully.
+**0. First, check the loose ends above and tell me which actually
+matter.** There are several deferred items (NTFY_COMMAND_TOPIC not set
+up yet so the mark-done button is absent, the GitHub Actions keepalive
+before workflows auto-disable in late September, the cron-job.org PAT
+expiring ~2026-10-27 with a silent failure mode, the gmail.modify OAuth
+re-consent, ANTHROPIC_API_KEY still a placeholder). Don't just list them
+back at me — tell me which are genuinely worth doing now vs. which can
+wait, and flag anything time-sensitive I'd regret missing.
 
-2. Set up NTFY_COMMAND_TOPIC with Peter and verify the mark-done button
-   end-to-end against a real notification.
+**1. Small tweaks to how notifications look on the lock screen.** Minor
+only. Right now: ntfy Title = category + class emoji ("📊 Assignment
+overdue"), body = "Class · Name — relative time". Show me what a few
+real notifications currently look like end to end (poll ntfy directly,
+don't just read the code), then propose small refinements. I'll tell you
+what to change from there.
 
-3. Add a keepalive so GitHub doesn't disable the scheduled workflow
-   after 60 days of no commits — it would go silent in late September
-   with no warning. (Old item, still not done, still low urgency.)
+**2. Define how the workflow should behave for specific scenarios.**
+This is a design conversation before any code. I want to walk through
+real situations — what happens when I add something last-minute, when
+something's overdue for a week, when I have five things due the same
+day, when I mark something done from my phone mid-class, etc. — and
+decide what the system SHOULD do in each. Ask me about the scenarios
+that matter rather than assuming.
+
+**3. Test and audit the capture layer** (gmail_scan.py,
+classroom_scan.py). This is the largest untested surface in the project:
+written, never run against real data, and four bugs were already found
+in it by code-tracing alone — assume more exist.
+
+   HEADS UP, this is partly blocked and you should say so early rather
+   than working around it silently: gmail_scan needs a real
+   ANTHROPIC_API_KEY (still the literal placeholder sk-ant-xxxx) and
+   classroom_scan needs a Google account with actual courses (the OAuth
+   account, petadaone@gmail.com, is my personal one and has zero —
+   verified live, courses.list just returns empty). Tell me what you CAN
+   meaningfully test without those, what needs me to provide something
+   first, and what it'd take to test it properly.
+
+**4. Then step back and assess the whole system as a productivity tool,
+not as code.** This is the part I care most about. Does this actually
+propel me toward my goals, or is it just technically impressive? What
+should change, get added, or get REMOVED to make it more effective? Be
+honest — if something is over-engineered, unused, or actively creating
+noise rather than reducing it, say so. I'd rather hear "this feature
+isn't earning its place" than have you defend everything that exists.
+
+**Ordering note:** 1 and 2 come before 3 and 4 on purpose. Defining the
+scenario behavior (2) will likely change what I want out of the capture
+layer, so testing it first means auditing against a spec that's about to
+move. And if the session starts running out of room, push item 3, not
+item 4 — capture-layer auditing is open-ended, and "is this actually
+helping me" is the better use of a session.
 
 ## Ground rules that were earned the hard way
 
