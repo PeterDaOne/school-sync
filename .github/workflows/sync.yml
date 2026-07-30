@@ -116,6 +116,12 @@ jobs:
           PRIORITY_MULTIPLIER_LOW: ${{ vars.PRIORITY_MULTIPLIER_LOW || '2.0' }}
           REMINDER_JITTER_FRACTION: ${{ vars.REMINDER_JITTER_FRACTION || '0.25' }}
           MAX_NOTIFICATIONS_PER_PASS: ${{ vars.MAX_NOTIFICATIONS_PER_PASS || '3' }}
+          # Overdue back-off + allocation (added 2026-07-30). These must
+          # match the Mac, or the two schedulers disagree about how hard
+          # to nag the same item.
+          OVERDUE_DECAY_BASE: ${{ vars.OVERDUE_DECAY_BASE || '2.0' }}
+          OVERDUE_MAX_INTERVAL_HOURS: ${{ vars.OVERDUE_MAX_INTERVAL_HOURS || '24.0' }}
+          DAILY_NOTIFICATION_BUDGET: ${{ vars.DAILY_NOTIFICATION_BUDGET || '8' }}
           EVENT_REMINDER_HOUR: ${{ vars.EVENT_REMINDER_HOUR || '07:00' }}
           CLOUD_REMINDERS: ${{ vars.CLOUD_REMINDERS || 'true' }}
           CLOUD_REMINDER_LAG_MINUTES: ${{ vars.CLOUD_REMINDER_LAG_MINUTES || '5' }}

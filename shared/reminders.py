@@ -40,6 +40,13 @@ Cadence rules:
     the whole thing, including the floor, so a High-priority overdue
     item still nags harder than a Low-priority one.
 
+    OVERDUE DECAY (added 2026-07-30) then backs that off again: the
+    interval doubles for each full day an item stays overdue, up to once
+    a day. "Constant rate forever once overdue" was the previous
+    behavior and it was measurably wrong -- simulated against Peter's
+    real items it produced 238 pushes in 7 days, 167 from a single
+    overdue task. See Cadence.overdue_decay.
+
     Jitter is a deterministic (same item -> same factor, always) ±25%
     perturbation derived from the page id. It's what actually breaks
     the phase-lock: two items in the same tier separate on their very
@@ -62,9 +69,13 @@ and that behavior is the correct one — marking an event Done is Peter
 saying he's handled it, and calendar_client deletes its Calendar entry at
 the same moment. Docs now match code; tests pin it.
 
-Quiet hours suppress delivery but don't consume the slot: if a reminder
-is due during quiet hours, Last Reminded is left untouched, so it fires
-as soon as the next pass lands outside quiet hours.
+Quiet hours CONSUME the slot rather than queueing it (changed
+2026-07-30): a reminder that comes due at 2am is stamped but never
+pushed, and the item waits a full interval for its next one. Previously
+the slot was left untouched, which meant everything held overnight fired
+the instant quiet hours ended -- observed live as three pushes at
+05:00:48/:49/:50. due_for_reminder returns those as `silent=True`
+Reminders; the caller must stamp Last Reminded and NOT send.
 
 THE `lag` PARAMETER — how double-firing is prevented
 ----------------------------------------------------
@@ -88,7 +99,7 @@ about when the reminder became due.
 """
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, time as dtime
 
 from . import classmap, config, timeutil
@@ -109,6 +120,19 @@ DEFAULT_PRIORITY_MULTIPLIER_LOW = 2.0
 DEFAULT_JITTER_FRACTION = 0.25
 DEFAULT_MAX_PER_PASS = 3
 DEFAULT_EVENT_REMINDER_HOUR = "07:00"
+
+# Overdue back-off (added 2026-07-30). Interval multiplies by
+# OVERDUE_DECAY_BASE for each full day an item stays overdue, until it
+# hits OVERDUE_MAX_INTERVAL. See Cadence.overdue_decay for why.
+DEFAULT_OVERDUE_DECAY_BASE = 2.0
+DEFAULT_OVERDUE_MAX_INTERVAL = 24.0
+# Enough doublings to blow past any sane OVERDUE_MAX_INTERVAL_HOURS.
+_MAX_DECAY_DOUBLINGS = 16
+
+# Ceiling on how many items may be in "already reminded today, wants
+# another" state at once. See pipeline._allocate for what this does and,
+# importantly, what it does not guarantee.
+DEFAULT_DAILY_BUDGET = 8
 
 # Hard safety rail applied after every multiplier -- no combination of
 # High priority + a low jitter roll should ever produce a notification
@@ -196,6 +220,9 @@ class Cadence:
     jitter_fraction: float = DEFAULT_JITTER_FRACTION
     max_per_pass: int = DEFAULT_MAX_PER_PASS
     event_reminder_hour: dtime = dtime(7, 0)
+    overdue_decay_base: float = DEFAULT_OVERDUE_DECAY_BASE
+    overdue_max_interval: float = DEFAULT_OVERDUE_MAX_INTERVAL
+    daily_budget: int = DEFAULT_DAILY_BUDGET
 
     @classmethod
     def from_env(cls) -> "Cadence":
@@ -273,6 +300,21 @@ class Cadence:
                 config.optional("EVENT_REMINDER_HOUR", DEFAULT_EVENT_REMINDER_HOUR),
                 DEFAULT_EVENT_REMINDER_HOUR,
             ),
+            overdue_decay_base=_parse_float(
+                config.optional("OVERDUE_DECAY_BASE", str(DEFAULT_OVERDUE_DECAY_BASE)),
+                DEFAULT_OVERDUE_DECAY_BASE,
+                "OVERDUE_DECAY_BASE",
+            ),
+            overdue_max_interval=_parse_float(
+                config.optional("OVERDUE_MAX_INTERVAL_HOURS", str(DEFAULT_OVERDUE_MAX_INTERVAL)),
+                DEFAULT_OVERDUE_MAX_INTERVAL,
+                "OVERDUE_MAX_INTERVAL_HOURS",
+            ),
+            daily_budget=_parse_int(
+                config.optional("DAILY_NOTIFICATION_BUDGET", str(DEFAULT_DAILY_BUDGET)),
+                DEFAULT_DAILY_BUDGET,
+                "DAILY_NOTIFICATION_BUDGET",
+            ),
         )
 
     def in_quiet_hours(self, moment: datetime) -> bool:
@@ -304,8 +346,49 @@ class Cadence:
             )
         raw_hours = max(floor, min(ceiling, alpha * days_until))
         multiplier = self.priority_multiplier.get(priority or "Medium", 1.0)
-        hours = raw_hours * multiplier * _jitter_factor(page_id, self.jitter_fraction)
+        hours = raw_hours * multiplier * self.overdue_decay(days_until)
+
+        # The overdue cap is applied BEFORE jitter, deliberately. Applying
+        # it after would hand every deeply-overdue item the identical
+        # value (exactly overdue_max_interval), which re-creates the exact
+        # phase-lock jitter exists to prevent — every long-overdue item
+        # firing together, once a day, forever. Caught by
+        # test_breaks_up_a_shared_tier failing when the clamp was last.
+        if days_until < 0:
+            hours = min(hours, self.overdue_max_interval)
+
+        hours *= _jitter_factor(page_id, self.jitter_fraction)
         return max(hours, ABSOLUTE_MIN_INTERVAL_HOURS)
+
+    def overdue_decay(self, days_until: float) -> float:
+        """
+        Multiplier that backs the cadence OFF the longer an item stays
+        overdue: 1x on the first day, then `overdue_decay_base` per full
+        day after that, until interval_hours clamps it at
+        `overdue_max_interval` (once a day by default).
+
+        Added 2026-07-30, Peter's call, after simulating the shipped
+        cadence against his real items: it produced 238 notifications in
+        7 days from 5 items, 167 of them from ONE overdue task sitting on
+        the 1-hour floor and re-firing every waking hour forever with
+        byte-identical text. The old "constant rate forever once overdue"
+        behavior was a deliberate choice, and it was the wrong one — past
+        about the twentieth identical push you have stopped reading them,
+        so the pressure isn't pressure any more, it's just training you
+        to swipe the app away. Decaying to once a day keeps the item
+        present without spending your attention on it.
+
+        Returns 1.0 for anything not overdue, so the not-yet-due path is
+        untouched.
+        """
+        if days_until >= 0:
+            return 1.0
+        # Capped exponent: interval_hours clamps the result to
+        # overdue_max_interval anyway, so raising 2 to the power of a
+        # 400-day-overdue item buys nothing and computes a number with
+        # 120 digits in it.
+        full_days_overdue = min(int(-days_until), _MAX_DECAY_DOUBLINGS)
+        return self.overdue_decay_base ** full_days_overdue
 
 
 def cloud_lag() -> timedelta:
@@ -382,6 +465,11 @@ class Reminder:
 
     title: str
     body: str
+    # True when this reminder came due inside quiet hours. The caller must
+    # NOT push it, but must still stamp Last Reminded -- the slot is spent
+    # silently. See due_for_reminder for why that's the behavior Peter
+    # chose over queueing it until morning.
+    silent: bool = False
     priority: int = 3  # ntfy priority, 1-5
     # ntfy converts any tag matching an emoji short code into an emoji and
     # PREPENDS it to the title. The old default of "school" therefore put
@@ -424,19 +512,45 @@ def due_for_reminder(
     lag: timedelta = timedelta(0),
 ) -> Reminder | None:
     """
-    Returns the Reminder to send right now, or None.
+    Returns the Reminder to act on right now, or None.
+
+    A returned Reminder with `silent=True` must be STAMPED BUT NOT SENT —
+    see below.
 
     `now` must be timezone-aware (callers pass timeutil.now()) since it
     is compared directly against offset-aware Notion timestamps.
     `lag` makes this caller defer to a faster one — see module docstring.
+
+    QUIET HOURS CONSUME THE SLOT, THEY DON'T QUEUE IT (changed 2026-07-30)
+    ---------------------------------------------------------------------
+    This used to return None during quiet hours and leave Last Reminded
+    untouched, so everything that came due overnight stayed due and fired
+    the instant quiet hours ended. Observed live: three pushes at
+    05:00:48, :49 and :50 — one second apart, before Peter was even up.
+    Jitter cannot fix that, because those items were never phase-locked;
+    they were all *held* and released by the same gate.
+
+    Peter's call: don't hold them at all. A reminder that comes due at 2am
+    is spent silently — Last Reminded is stamped, nothing is pushed — and
+    the item simply waits a full interval for its next one, which lands
+    naturally during the day, spread out by its own jitter.
+
+    The cost, and it is a real one: Last Reminded now means "when the
+    reminder slot was last spent", not "when your phone last buzzed".
+    A 2am timestamp on an item you were never notified about is expected,
+    not a bug.
     """
-    if item.get("is_complete"):
-        return None
-
     cadence = cadence or Cadence.from_env()
+    reminder = _evaluate(item, now, cadence, lag)
+    # Evaluated against the real `now`, never the lagged time: quiet hours
+    # are a question about this moment, not about when the reminder came due.
+    if reminder and cadence.in_quiet_hours(now):
+        return replace(reminder, silent=True)
+    return reminder
 
-    # Delivery gate: always the real `now`, never the lagged time.
-    if cadence.in_quiet_hours(now):
+
+def _evaluate(item: dict, now: datetime, cadence: Cadence, lag: timedelta) -> Reminder | None:
+    if item.get("is_complete"):
         return None
 
     effective = now - lag

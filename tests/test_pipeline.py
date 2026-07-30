@@ -13,6 +13,7 @@ and lost rather than retried.
 """
 
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from unittest import mock
 
@@ -92,7 +93,7 @@ class RunSyncPassNotifyWiring(unittest.TestCase):
             nc.get_all_items.return_value = [page]
             nc.extract_fields.return_value = dict(ITEM)
             st.needs_sync.return_value = False
-            cadence = mock.Mock(max_per_pass=max_per_pass)
+            cadence = mock.Mock(max_per_pass=max_per_pass, daily_budget=8)
             rm.Cadence.from_env.return_value = cadence
             rm.due_for_reminder.return_value = reminder or REMINDER
             report = pipeline.run_sync_pass(
@@ -153,3 +154,116 @@ class RunSyncPassNotifyWiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuietHoursConsumeTheSlot(unittest.TestCase):
+    """
+    A silent Reminder must be STAMPED and NOT SENT. Getting this backwards
+    in either direction is a real bug: not stamping re-creates the 05:00
+    burst this change exists to kill, and sending it buzzes Peter's phone
+    at 2am.
+    """
+
+    def _run(self, silent: bool):
+        page = {"id": "page-1"}
+        with (
+            mock.patch.object(pipeline, "notion_client") as nc,
+            mock.patch.object(pipeline, "calendar_client"),
+            mock.patch.object(pipeline, "state") as st,
+            mock.patch.object(pipeline, "reminders") as rm,
+            mock.patch.object(pipeline, "notify", return_value=True) as nf,
+        ):
+            nc.get_all_items.return_value = [page]
+            nc.extract_fields.return_value = dict(ITEM)
+            st.needs_sync.return_value = False
+            rm.Cadence.from_env.return_value = mock.Mock(max_per_pass=3, daily_budget=8)
+            rm.due_for_reminder.return_value = replace(REMINDER, silent=silent)
+            report = pipeline.run_sync_pass("test", send_reminders=True)
+            return report, nc, nf
+
+    def test_silent_reminder_is_not_pushed(self):
+        _, _, notify_fn = self._run(silent=True)
+        notify_fn.assert_not_called()
+
+    def test_silent_reminder_still_stamps_last_reminded(self):
+        """This is the whole point: spending the slot is what stops it
+        from detonating the moment quiet hours end."""
+        _, nc, _ = self._run(silent=True)
+        nc.mark_reminded.assert_called_once()
+
+    def test_silent_reminder_is_counted_as_suppressed_not_failed(self):
+        report, _, _ = self._run(silent=True)
+        self.assertEqual(report.suppressed, 1)
+        self.assertEqual(report.reminded, 0)
+        self.assertEqual(report.deferred, 0)
+        self.assertTrue(report.ok)
+
+    def test_a_normal_reminder_is_still_sent(self):
+        report, _, notify_fn = self._run(silent=False)
+        notify_fn.assert_called_once()
+        self.assertEqual(report.suppressed, 0)
+        self.assertEqual(report.reminded, 1)
+
+
+class Allocation(unittest.TestCase):
+    """
+    Peter's rule (2026-07-30): guarantee every item one notification
+    before any item gets a second, then spend what's left on the most
+    urgent.
+    """
+
+    def _cadence(self, max_per_pass=10, daily_budget=8):
+        return mock.Mock(max_per_pass=max_per_pass, daily_budget=daily_budget)
+
+    def _cand(self, item_id, priority, due=None):
+        return (
+            dict(ITEM, id=item_id, due_date=due, priority=None),
+            replace(REMINDER, priority=priority),
+        )
+
+    def _allocate(self, candidates, reminded_today, **kw):
+        report = pipeline.Report()
+        with mock.patch.object(pipeline.reminders, "due_datetime", return_value=None):
+            sent = pipeline._allocate(
+                candidates, reminded_today, self._cadence(**kw), report
+            )
+        return [c[0]["id"] for c in sent], report
+
+    def test_first_timers_come_before_repeats(self):
+        """A loud item that already had one today must not outrank a
+        quiet item that has had none."""
+        loud_repeat = self._cand("loud", 5)
+        quiet_new = self._cand("quiet", 3)
+        ids, _ = self._allocate([loud_repeat, quiet_new], reminded_today={"loud"})
+        self.assertEqual(ids[0], "quiet")
+
+    def test_within_first_timers_the_most_urgent_wins(self):
+        ids, _ = self._allocate(
+            [self._cand("low", 3), self._cand("high", 5)], reminded_today=set()
+        )
+        self.assertEqual(ids, ["high", "low"])
+
+    def test_repeats_are_capped_by_the_daily_budget(self):
+        repeats = [self._cand(f"r{i}", 4) for i in range(6)]
+        ids, report = self._allocate(
+            repeats, reminded_today={f"r{i}" for i in range(6)}, daily_budget=2
+        )
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(report.deferred, 4)
+
+    def test_first_timers_are_never_capped_by_the_daily_budget(self):
+        """The guarantee is a guarantee: the budget governs repeats only."""
+        news = [self._cand(f"n{i}", 4) for i in range(6)]
+        ids, _ = self._allocate(news, reminded_today=set(), daily_budget=2)
+        self.assertEqual(len(ids), 6)
+
+    def test_per_pass_cap_still_applies_on_top(self):
+        news = [self._cand(f"n{i}", 4) for i in range(6)]
+        ids, report = self._allocate(news, reminded_today=set(), max_per_pass=2)
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(report.deferred, 4)
+
+    def test_nothing_due_allocates_nothing_and_defers_nothing(self):
+        ids, report = self._allocate([], reminded_today=set())
+        self.assertEqual(ids, [])
+        self.assertEqual(report.deferred, 0)

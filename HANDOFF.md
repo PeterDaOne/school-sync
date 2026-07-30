@@ -29,9 +29,13 @@ the last session and is accurate. Don't rediscover what's already there.
 
 ## Where things actually stand
 
-Repo: https://github.com/PeterDaOne/school-sync (public). 190
+Repo: https://github.com/PeterDaOne/school-sync (public). 204
 stdlib-unittest tests (up from 171 this session), green locally and in
 CI. launchd job loaded and healthy under the new code.
+
+**UNPUSHED AS OF HANDOFF — check `git status` first.** The cloud runs
+from `main`, so until these commits are pushed GitHub Actions is running
+the OLD cadence and cannot read the renamed `For` property.
 
 **Verified working against real data:** the whole cloud path (secrets,
 dispatch-based sub-6-min latency, Calendar sync), the reminder engine's
@@ -56,7 +60,16 @@ correctly for all 10 live incomplete items; three real ntfy sends came
 back with the new emoji intact and the `Tags` header correctly ABSENT;
 both entrypoints ran clean end to end; launchd reloaded and fired.
 
-**The mark-done button is now LIVE and verified** (2026-07-30):
+**The mark-done button is CONFIRMED WORKING FROM PETER'S ACTUAL PHONE**
+(2026-07-30). He tapped it on a real, organically-generated reminder for
+"Make promposal" — 8 taps between 13:33:53 and 13:34:09, all landing on
+the command topic, applied once, no errors. The deliberate no-dedup-cursor
+design ("marking Done twice is a no-op") absorbed all eight cleanly.
+**The 8 taps are themselves a UX finding worth chasing**: either the
+notification didn't visibly clear, or several stacked reminders for the
+same item were each tapped. Worth asking him which.
+
+Setup detail (2026-07-30):
 NTFY_COMMAND_TOPIC was generated into `.env`, the plist regenerated, and
 the full loop driven end to end — a simulated tap (bare page id POSTed
 to the command topic) was picked up by the next `local_sync` pass

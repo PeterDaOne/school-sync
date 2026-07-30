@@ -101,16 +101,53 @@ class CadenceFormula(unittest.TestCase):
             CADENCE.interval_hours("Assignments", 0.1, "Medium", "x"), 2.0
         )
 
-    def test_assignment_overdue_uses_the_floor(self):
+    def test_freshly_overdue_uses_the_floor(self):
+        """The floor still governs the FIRST day overdue -- decay only
+        starts biting after a full day has passed."""
         self.assertAlmostEqual(
-            CADENCE.interval_hours("Assignments", -5, "Medium", "x"), 2.0
+            CADENCE.interval_hours("Assignments", -0.5, "Medium", "x"), 2.0
         )
 
-    def test_assignment_overdue_does_not_reaccelerate_the_longer_it_sits(self):
-        shallow = CADENCE.interval_hours("Assignments", -1, "Medium", "x")
+    def test_overdue_decays_the_longer_it_sits(self):
+        """
+        REVERSED 2026-07-30 (Peter's call). This used to assert the
+        opposite -- that an item overdue 100 days nagged exactly as hard
+        as one overdue 1 day -- which was a deliberate design choice and
+        a measurably bad one: simulated against real items it produced
+        167 pushes/week from a single stale task. Past about the
+        twentieth identical push the pressure has stopped being pressure.
+        """
+        day1 = CADENCE.interval_hours("Assignments", -0.5, "Medium", "x")
+        day2 = CADENCE.interval_hours("Assignments", -1.5, "Medium", "x")
+        day3 = CADENCE.interval_hours("Assignments", -2.5, "Medium", "x")
+        self.assertAlmostEqual(day2, day1 * 2)
+        self.assertAlmostEqual(day3, day1 * 4)
+
+    def test_overdue_decay_is_capped(self):
         deep = CADENCE.interval_hours("Assignments", -100, "Medium", "x")
-        self.assertAlmostEqual(shallow, deep)
-        self.assertAlmostEqual(deep, 2.0)
+        self.assertAlmostEqual(deep, CADENCE.overdue_max_interval)
+
+    def test_decay_never_applies_before_the_due_moment(self):
+        for days in (0.0, 0.5, 3.0, 40.0):
+            self.assertEqual(CADENCE.overdue_decay(days), 1.0, days)
+
+    def test_capped_overdue_items_are_still_desynchronized_by_jitter(self):
+        """
+        Regression: the cap used to be applied AFTER jitter, which handed
+        every deeply-overdue item the identical interval and re-created
+        the exact phase-lock jitter exists to prevent -- they would all
+        fire together, once a day, forever.
+        """
+        jittery = Cadence(
+            assignment_floor=2.0, assignment_ceiling=48.0, assignment_alpha=4.0,
+            overdue_max_interval=24.0, jitter_fraction=0.25,
+        )
+        a = jittery.interval_hours("Assignments", -100, "Medium", "page-a")
+        b = jittery.interval_hours("Assignments", -100, "Medium", "page-b")
+        self.assertNotEqual(a, b)
+        for v in (a, b):
+            self.assertGreaterEqual(v, 24.0 * 0.75)
+            self.assertLessEqual(v, 24.0 * 1.25)
 
     def test_no_discontinuity_crossing_the_due_moment(self):
         just_before = CADENCE.interval_hours("Tasks", 0.001, "Medium", "x")
@@ -127,16 +164,16 @@ class CadenceFormula(unittest.TestCase):
         be aggressive. Tasks stay quiet until close, so DO need a harder
         push once missed.
         """
-        task = CADENCE.interval_hours("Tasks", -5, "Medium", "x")
-        assignment = CADENCE.interval_hours("Assignments", -5, "Medium", "x")
+        task = CADENCE.interval_hours("Tasks", -0.5, "Medium", "x")
+        assignment = CADENCE.interval_hours("Assignments", -0.5, "Medium", "x")
         self.assertLess(task, assignment)
         self.assertAlmostEqual(task, 1.0)
         self.assertAlmostEqual(assignment, 2.0)
 
     def test_priority_multiplies_the_whole_thing_including_the_floor(self):
-        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", -5, "High", "x"), 1.0)
-        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", -5, "Medium", "x"), 2.0)
-        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", -5, "Low", "x"), 4.0)
+        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", -0.5, "High", "x"), 1.0)
+        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", -0.5, "Medium", "x"), 2.0)
+        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", -0.5, "Low", "x"), 4.0)
 
     def test_missing_priority_defaults_to_medium(self):
         self.assertAlmostEqual(
@@ -301,12 +338,15 @@ class CaptureNotification(unittest.TestCase):
         self.assertFalse(r.body.startswith("·"))
         self.assertTrue(r.body.startswith("Algebra Work"))
 
-    def test_suppressed_during_quiet_hours(self):
-        self.assertIsNone(
-            reminders.due_for_reminder(
-                item(last_reminded=None), at("2026-07-28T02:00"), cadence=CADENCE
-            )
+    def test_silenced_during_quiet_hours(self):
+        """Returns a Reminder marked silent, not None (changed
+        2026-07-30). The caller stamps Last Reminded and sends nothing,
+        so the slot is spent rather than queued until 05:00."""
+        r = reminders.due_for_reminder(
+            item(last_reminded=None), at("2026-07-28T02:00"), cadence=CADENCE
         )
+        self.assertIsNotNone(r)
+        self.assertTrue(r.silent)
 
 
 class CompletedItems(unittest.TestCase):
@@ -368,7 +408,8 @@ class RecurringReminders(unittest.TestCase):
         r = reminders.due_for_reminder(
             item(
                 due_date="2026-07-25T09:00:00-06:00",  # 3 days ago
-                last_reminded=(now - timedelta(hours=5)).isoformat(),
+                # 3 days overdue -> floor 2h x decay 2^3 = 16h between pushes
+                last_reminded=(now - timedelta(hours=17)).isoformat(),
             ),
             now,
             cadence=CADENCE,
@@ -377,16 +418,27 @@ class RecurringReminders(unittest.TestCase):
         self.assertEqual(r.body, "Algebra Work — was due 3 days ago")
         self.assertEqual(r.priority, 5)
 
-    def test_overdue_stays_loud_no_matter_how_long(self):
-        """Confirmed with Peter 2026-07-28: overdue items stay loud forever."""
+    def test_long_overdue_still_reminds_but_only_once_a_day(self):
+        """
+        REVERSED 2026-07-30. Previously "overdue items stay loud forever"
+        -- 3 hours since the last push was enough to fire again even for
+        something years overdue. Now the decay has long since hit the
+        once-a-day cap, so 3 hours is not enough and 25 is. It stays
+        PRESENT (still priority 5, still flagged) without spending
+        attention every hour.
+        """
         now = at("2026-07-28T09:00")
+        stale = item(due_date="2020-01-01T09:00:00-06:00")
+
+        too_soon = reminders.due_for_reminder(
+            dict(stale, last_reminded=(now - timedelta(hours=3)).isoformat()),
+            now, cadence=CADENCE,
+        )
+        self.assertIsNone(too_soon)
+
         r = reminders.due_for_reminder(
-            item(
-                due_date="2020-01-01T09:00:00-06:00",
-                last_reminded=(now - timedelta(hours=3)).isoformat(),
-            ),
-            now,
-            cadence=CADENCE,
+            dict(stale, last_reminded=(now - timedelta(hours=25)).isoformat()),
+            now, cadence=CADENCE,
         )
         self.assertIsNotNone(r)
         self.assertEqual(r.priority, 5)
@@ -400,16 +452,29 @@ class RecurringReminders(unittest.TestCase):
             )
         )
 
-    def test_suppressed_during_quiet_hours_without_consuming_the_slot(self):
-        # The caller only stamps Last Reminded when a message comes back,
-        # so returning None here is what preserves the slot for later.
-        self.assertIsNone(
-            reminders.due_for_reminder(
-                item(due_date="2026-07-28", last_reminded="2026-07-27T12:00:00+00:00"),
-                at("2026-07-28T02:00"),
-                cadence=CADENCE,
-            )
+    def test_quiet_hours_consume_the_slot_rather_than_queueing_it(self):
+        """
+        REVERSED 2026-07-30. This used to assert None -- meaning the slot
+        was preserved and the reminder fired the instant quiet hours
+        ended. Observed live, that released three pushes at 05:00:48,
+        :49 and :50, one second apart, before Peter was up. Now the slot
+        is spent silently and the item waits a full interval.
+        """
+        r = reminders.due_for_reminder(
+            item(due_date="2026-07-28", last_reminded="2026-07-27T12:00:00+00:00"),
+            at("2026-07-28T02:00"),
+            cadence=CADENCE,
         )
+        self.assertIsNotNone(r)
+        self.assertTrue(r.silent)
+
+    def test_outside_quiet_hours_is_never_silent(self):
+        r = reminders.due_for_reminder(
+            item(due_date="2026-07-28", last_reminded="2026-07-27T12:00:00+00:00"),
+            at("2026-07-28T09:00"),
+            cadence=CADENCE,
+        )
+        self.assertFalse(r.silent)
 
     def test_priority_changes_whether_it_fires_yet(self):
         now = at("2026-07-28T09:00")
@@ -627,18 +692,17 @@ class CloudTakeoverLag(unittest.TestCase):
         self.assertEqual(r.body, "Algebra Work — due Aug 26")
 
     def test_script_captured_items_still_respect_quiet_hours(self):
-        self.assertIsNone(
-            reminders.due_for_reminder(
-                item(
-                    last_reminded=None,
-                    created_time="2026-07-28T08:00:00.000Z",
-                    external_id="gmail:abc123",
-                ),
-                at("2026-07-28T02:00"),
-                cadence=CADENCE,
-                lag=self.LAG,
-            )
+        r = reminders.due_for_reminder(
+            item(
+                last_reminded=None,
+                created_time="2026-07-28T08:00:00.000Z",
+                external_id="gmail:abc123",
+            ),
+            at("2026-07-28T02:00"),
+            cadence=CADENCE,
+            lag=self.LAG,
         )
+        self.assertTrue(r.silent)
 
     def test_script_captured_items_still_respect_completion(self):
         self.assertIsNone(
@@ -665,7 +729,7 @@ class CloudTakeoverLag(unittest.TestCase):
         the lagged time is 23:55 — outside quiet hours — but it is
         genuinely the middle of the night and must stay silent.
         """
-        self.assertIsNone(
+        self.assertTrue(
             reminders.due_for_reminder(
                 item(due_date="2026-07-28", last_reminded="2026-07-27T12:00:00+00:00"),
                 at("2026-07-28T00:05"),
