@@ -500,9 +500,40 @@ def _title(type_name: str, kind: str, category: str | None) -> str:
     return f"{emoji} {label}" if emoji else label
 
 
-def _body(category: str | None, name: str, suffix: str) -> str:
+def _body(category: str | None, name: str, suffix: str, repeat_of: datetime | None = None) -> str:
+    """
+    "Class · Name — suffix", plus a repeat marker when this is not the
+    first reminder for this item today.
+
+    WHY THE MARKER EXISTS
+    ---------------------
+    ntfy CAN replace a delivered notification in place (publish with the
+    same X-Sequence-ID) — verified live 2026-07-30, the server accepts it
+    and echoes `sequence_id` back. But acting on it is a CLIENT feature,
+    and ntfy's docs list it for "the web app and Android app" only.
+    Peter is on iOS: three test messages sharing one sequence id arrived
+    as three separate notifications on his phone, confirmed by eye.
+
+    So repeats cannot be collapsed and will stack. If they stack, they
+    must at least be tellable apart — four byte-identical "AP Lang ·
+    The Odessy — due today" cards is the worst of both worlds. This is
+    Peter's call between marking repeats vs. escalating priority.
+
+    WHAT THIS DELIBERATELY DOES NOT SAY: "3rd reminder today". Last
+    Reminded is a single timestamp, not a counter, so an honest ordinal
+    needs new persistent state (a Notion property both the Mac and
+    GitHub's ephemeral runners can see) — the same tradeoff refused for
+    pipeline._allocate's daily budget. Naming the previous reminder's
+    time is exactly derivable from what we already store, makes every
+    card in a stack unique, and shows the chain without inventing a
+    count we cannot back up.
+    """
     prefix = f"{category} · " if category else ""
-    return f"{prefix}{name} — {suffix}" if suffix else f"{prefix}{name}"
+    head = f"{prefix}{name} — {suffix}" if suffix else f"{prefix}{name}"
+    if repeat_of is None:
+        return head
+    local = repeat_of.astimezone(timeutil.school_tz())
+    return f"{head} · again, last {local.strftime('%-I:%M %p')}"
 
 
 def due_for_reminder(
@@ -644,9 +675,20 @@ def _evaluate(item: dict, now: datetime, cadence: Cadence, lag: timedelta) -> Re
     overdue = days_until < 0
     verb = "was due" if overdue else "due"
     priority = 5 if overdue else (4 if days_until < 1 else 3)
+    # Calendar-day comparison in Peter's timezone, not "within the last 24
+    # hours" -- a reminder at 11pm and the next at 1am are two hours apart
+    # but are not the same day's nagging, and this file has shipped that
+    # exact class of bug twice before.
+    repeat_of = (
+        last_reminded
+        if timeutil.calendar_days_between(effective, last_reminded) == 0
+        else None
+    )
     return Reminder(
         title=_title(type_name, "overdue" if overdue else "reminder", category),
-        body=_body(category, name, f"{verb} {relative_due(due, has_time, effective)}"),
+        body=_body(
+            category, name, f"{verb} {relative_due(due, has_time, effective)}", repeat_of
+        ),
         priority=priority,
         tags="rotating_light" if priority >= 4 else "",
     )

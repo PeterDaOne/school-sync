@@ -400,7 +400,8 @@ class RecurringReminders(unittest.TestCase):
             cadence=CADENCE,
         )
         self.assertEqual(r.title, "📝 Assignment reminder")
-        self.assertEqual(r.body, "Algebra Work — due today at 9:00 AM")
+        # Same-day previous reminder, so it now carries the repeat marker.
+        self.assertEqual(r.body, "Algebra Work — due today at 9:00 AM · again, last 6:00 AM")
         self.assertEqual(r.priority, 4)
 
     def test_overdue_wording(self):
@@ -855,3 +856,57 @@ class CategoryEmojiInTitle(unittest.TestCase):
         )
         self.assertTrue(r.title.startswith("☑️"), r.title)
         self.assertNotIn(" · ", r.body)
+
+
+class RepeatMarker(unittest.TestCase):
+    """
+    Repeats stack on iOS and cannot be collapsed: ntfy's X-Sequence-ID
+    replacement is a client feature its docs list for the web and Android
+    apps only, and three messages sharing a sequence id arrived as three
+    separate notifications on Peter's iPhone (confirmed by eye
+    2026-07-30). Since they stack, they must be tellable apart.
+    """
+
+    def _r(self, last_reminded, now="2026-07-30T13:00", **kw):
+        kw.setdefault("due_date", "2026-07-30")
+        return reminders.due_for_reminder(
+            item(last_reminded=last_reminded, category="AP Lang", **kw),
+            at(now),
+            cadence=CADENCE,
+        )
+
+    def test_first_reminder_of_the_day_has_no_marker(self):
+        r = self._r("2026-07-29T18:00:00-06:00")
+        self.assertNotIn("again", r.body)
+
+    def test_a_repeat_names_the_previous_reminder_time(self):
+        r = self._r("2026-07-30T09:25:00-06:00")
+        self.assertIn("again, last 9:25 AM", r.body)
+
+    def test_two_repeats_in_one_day_are_not_identical(self):
+        """The whole point: a stack of cards must be distinguishable."""
+        first = self._r("2026-07-29T18:00:00-06:00")
+        second = self._r("2026-07-30T09:25:00-06:00")
+        third = self._r("2026-07-30T10:50:00-06:00")
+        self.assertEqual(len({first.body, second.body, third.body}), 3)
+
+    def test_uses_calendar_day_not_a_24_hour_window(self):
+        """
+        11pm yesterday to 6am today is 7 hours apart but is NOT the same
+        day's nagging. This file has shipped the 24-hour-bucket bug twice
+        before; pinning the calendar-day reading here.
+        """
+        r = self._r("2026-07-29T23:00:00-06:00", now="2026-07-30T06:00")
+        self.assertNotIn("again", r.body)
+
+    def test_marker_survives_the_overdue_path_too(self):
+        r = self._r("2026-07-30T05:00:00-06:00", now="2026-07-30T22:00", due_date="2026-07-27")
+        self.assertIn("was due 3 days ago", r.body)
+        self.assertIn("again, last 5:00 AM", r.body)
+
+    def test_capture_never_carries_a_repeat_marker(self):
+        """Capture fires exactly once — there is nothing to repeat."""
+        r = reminders.due_for_reminder(
+            item(last_reminded=None), at("2026-07-30T13:00"), cadence=CADENCE
+        )
+        self.assertNotIn("again", r.body)

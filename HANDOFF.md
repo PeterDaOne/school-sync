@@ -29,7 +29,7 @@ the last session and is accurate. Don't rediscover what's already there.
 
 ## Where things actually stand
 
-Repo: https://github.com/PeterDaOne/school-sync (public). 204
+Repo: https://github.com/PeterDaOne/school-sync (public). 210
 stdlib-unittest tests (up from 171 this session), green locally and in
 CI. launchd job loaded and healthy under the new code.
 
@@ -65,9 +65,12 @@ both entrypoints ran clean end to end; launchd reloaded and fired.
 "Make promposal" — 8 taps between 13:33:53 and 13:34:09, all landing on
 the command topic, applied once, no errors. The deliberate no-dedup-cursor
 design ("marking Done twice is a no-op") absorbed all eight cleanly.
-**The 8 taps are themselves a UX finding worth chasing**: either the
-notification didn't visibly clear, or several stacked reminders for the
-same item were each tapped. Worth asking him which.
+The 8 taps were investigated: ntfy's cache showed only 2 pushes for
+that item, so it was a small stack PLUS repeated tapping of a button
+with no visible feedback (6 taps in 4 seconds). Fixed indirectly --
+repeats are now visibly distinct (see below). **The button giving no
+immediate on-phone feedback is still unaddressed** and is the most
+likely remaining source of confusion.
 
 Setup detail (2026-07-30):
 NTFY_COMMAND_TOPIC was generated into `.env`, the plist regenerated, and
