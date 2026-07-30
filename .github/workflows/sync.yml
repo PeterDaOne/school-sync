@@ -122,6 +122,8 @@ jobs:
           OVERDUE_DECAY_BASE: ${{ vars.OVERDUE_DECAY_BASE || '2.0' }}
           OVERDUE_MAX_INTERVAL_HOURS: ${{ vars.OVERDUE_MAX_INTERVAL_HOURS || '24.0' }}
           DAILY_NOTIFICATION_BUDGET: ${{ vars.DAILY_NOTIFICATION_BUDGET || '8' }}
+          # The hard floor: nothing notifies twice inside this window.
+          MIN_INTERVAL_HOURS: ${{ vars.MIN_INTERVAL_HOURS || '2.0' }}
           EVENT_REMINDER_HOUR: ${{ vars.EVENT_REMINDER_HOUR || '07:00' }}
           CLOUD_REMINDERS: ${{ vars.CLOUD_REMINDERS || 'true' }}
           CLOUD_REMINDER_LAG_MINUTES: ${{ vars.CLOUD_REMINDER_LAG_MINUTES || '5' }}

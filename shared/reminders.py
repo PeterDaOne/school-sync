@@ -23,7 +23,7 @@ Cadence rules:
 
         raw_hours = clamp(alpha[type] * days_until, floor[type], ceiling[type])
         hours     = raw_hours * priority_multiplier[priority] * jitter_factor(id)
-        hours     = max(hours, ABSOLUTE_MIN_INTERVAL_HOURS)
+        hours     = max(hours, min_interval)          # hard floor, 2h
 
     `days_until` is signed and fractional — negative means overdue. One
     clamp handles both directions: a very negative days_until makes
@@ -134,10 +134,24 @@ _MAX_DECAY_DOUBLINGS = 16
 # importantly, what it does not guarantee.
 DEFAULT_DAILY_BUDGET = 8
 
-# Hard safety rail applied after every multiplier -- no combination of
-# High priority + a low jitter roll should ever produce a notification
-# rate spammier than every 15 minutes.
-ABSOLUTE_MIN_INTERVAL_HOURS = 0.25
+# THE HARD FLOOR: no item may ever notify twice inside this window.
+# Peter's rule, 2026-07-30, and it is deliberately blunt -- it overrides
+# every other knob in this file.
+#
+# It was 0.25 (15 minutes), which was not a real limit: a High-priority
+# overdue Task took the 1h task floor x 0.5 priority multiplier and could
+# legitimately fire every THIRTY MINUTES. Two hours is the rate at which
+# a stack cannot build in the first place, which is the actual goal --
+# repeats stack on iOS and cannot be collapsed (see notify.py), so the
+# only real defense is not generating them.
+#
+# Enforced in TWO places on purpose:
+#   1. Cadence.interval_hours clamps the computed interval (covers the
+#      Assignments/Tasks cadence math).
+#   2. due_for_reminder refuses outright if Last Reminded is inside the
+#      window (covers EVERY path, including Events' fixed tiers and any
+#      future one, and survives someone re-tuning the constants above).
+DEFAULT_MIN_INTERVAL_HOURS = 2.0
 
 
 def _parse_hhmm(s: str, fallback: str) -> dtime:
@@ -223,6 +237,7 @@ class Cadence:
     overdue_decay_base: float = DEFAULT_OVERDUE_DECAY_BASE
     overdue_max_interval: float = DEFAULT_OVERDUE_MAX_INTERVAL
     daily_budget: int = DEFAULT_DAILY_BUDGET
+    min_interval: float = DEFAULT_MIN_INTERVAL_HOURS
 
     @classmethod
     def from_env(cls) -> "Cadence":
@@ -315,6 +330,11 @@ class Cadence:
                 DEFAULT_DAILY_BUDGET,
                 "DAILY_NOTIFICATION_BUDGET",
             ),
+            min_interval=_parse_float(
+                config.optional("MIN_INTERVAL_HOURS", str(DEFAULT_MIN_INTERVAL_HOURS)),
+                DEFAULT_MIN_INTERVAL_HOURS,
+                "MIN_INTERVAL_HOURS",
+            ),
         )
 
     def in_quiet_hours(self, moment: datetime) -> bool:
@@ -358,7 +378,7 @@ class Cadence:
             hours = min(hours, self.overdue_max_interval)
 
         hours *= _jitter_factor(page_id, self.jitter_fraction)
-        return max(hours, ABSOLUTE_MIN_INTERVAL_HOURS)
+        return max(hours, self.min_interval)
 
     def overdue_decay(self, days_until: float) -> float:
         """
@@ -500,40 +520,9 @@ def _title(type_name: str, kind: str, category: str | None) -> str:
     return f"{emoji} {label}" if emoji else label
 
 
-def _body(category: str | None, name: str, suffix: str, repeat_of: datetime | None = None) -> str:
-    """
-    "Class · Name — suffix", plus a repeat marker when this is not the
-    first reminder for this item today.
-
-    WHY THE MARKER EXISTS
-    ---------------------
-    ntfy CAN replace a delivered notification in place (publish with the
-    same X-Sequence-ID) — verified live 2026-07-30, the server accepts it
-    and echoes `sequence_id` back. But acting on it is a CLIENT feature,
-    and ntfy's docs list it for "the web app and Android app" only.
-    Peter is on iOS: three test messages sharing one sequence id arrived
-    as three separate notifications on his phone, confirmed by eye.
-
-    So repeats cannot be collapsed and will stack. If they stack, they
-    must at least be tellable apart — four byte-identical "AP Lang ·
-    The Odessy — due today" cards is the worst of both worlds. This is
-    Peter's call between marking repeats vs. escalating priority.
-
-    WHAT THIS DELIBERATELY DOES NOT SAY: "3rd reminder today". Last
-    Reminded is a single timestamp, not a counter, so an honest ordinal
-    needs new persistent state (a Notion property both the Mac and
-    GitHub's ephemeral runners can see) — the same tradeoff refused for
-    pipeline._allocate's daily budget. Naming the previous reminder's
-    time is exactly derivable from what we already store, makes every
-    card in a stack unique, and shows the chain without inventing a
-    count we cannot back up.
-    """
+def _body(category: str | None, name: str, suffix: str) -> str:
     prefix = f"{category} · " if category else ""
-    head = f"{prefix}{name} — {suffix}" if suffix else f"{prefix}{name}"
-    if repeat_of is None:
-        return head
-    local = repeat_of.astimezone(timeutil.school_tz())
-    return f"{head} · again, last {local.strftime('%-I:%M %p')}"
+    return f"{prefix}{name} — {suffix}" if suffix else f"{prefix}{name}"
 
 
 def due_for_reminder(
@@ -573,9 +562,31 @@ def due_for_reminder(
     """
     cadence = cadence or Cadence.from_env()
     reminder = _evaluate(item, now, cadence, lag)
+    if reminder is None:
+        return None
+
+    # THE HARD FLOOR (Peter's rule, 2026-07-30): nothing notifies twice
+    # inside min_interval, no matter which path produced the reminder or
+    # what the cadence math said. Deliberately a separate, blunter check
+    # than interval_hours' clamp -- that one only governs the
+    # Assignments/Tasks formula, while this also catches Events (whose
+    # morning-of and 1-hour-before tiers can otherwise land ~1h apart for
+    # an early event) and anything added later.
+    #
+    # Measured against the real clock, not `effective`: this is a
+    # question about how recently the phone actually buzzed.
+    # No try/except: _evaluate already parsed this same value before it
+    # could return a Reminder, so reaching here means it parses. An
+    # unparseable stamp raises there and pipeline.py catches it per item
+    # and fails the run loudly, which is the policy this project wants --
+    # swallowing it here would silence the item instead.
+    if item.get("last_reminded"):
+        if now - timeutil.parse(item["last_reminded"]) < timedelta(hours=cadence.min_interval):
+            return None
+
     # Evaluated against the real `now`, never the lagged time: quiet hours
     # are a question about this moment, not about when the reminder came due.
-    if reminder and cadence.in_quiet_hours(now):
+    if cadence.in_quiet_hours(now):
         return replace(reminder, silent=True)
     return reminder
 
@@ -675,20 +686,9 @@ def _evaluate(item: dict, now: datetime, cadence: Cadence, lag: timedelta) -> Re
     overdue = days_until < 0
     verb = "was due" if overdue else "due"
     priority = 5 if overdue else (4 if days_until < 1 else 3)
-    # Calendar-day comparison in Peter's timezone, not "within the last 24
-    # hours" -- a reminder at 11pm and the next at 1am are two hours apart
-    # but are not the same day's nagging, and this file has shipped that
-    # exact class of bug twice before.
-    repeat_of = (
-        last_reminded
-        if timeutil.calendar_days_between(effective, last_reminded) == 0
-        else None
-    )
     return Reminder(
         title=_title(type_name, "overdue" if overdue else "reminder", category),
-        body=_body(
-            category, name, f"{verb} {relative_due(due, has_time, effective)}", repeat_of
-        ),
+        body=_body(category, name, f"{verb} {relative_due(due, has_time, effective)}"),
         priority=priority,
         tags="rotating_light" if priority >= 4 else "",
     )

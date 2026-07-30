@@ -157,23 +157,41 @@ class CadenceFormula(unittest.TestCase):
     def test_task_alpha_differs_from_assignment(self):
         self.assertAlmostEqual(CADENCE.interval_hours("Tasks", 2, "Medium", "x"), 40.0)
 
-    def test_task_overdue_floor_is_more_aggressive_than_assignment(self):
+    def test_min_interval_flattens_the_task_vs_assignment_floor(self):
         """
-        Peter's explicit call: Assignments get nagged early (high
-        ceiling reached far out), so their overdue floor doesn't need to
-        be aggressive. Tasks stay quiet until close, so DO need a harder
-        push once missed.
+        SUPERSEDED 2026-07-30. Tasks used to have a 1h overdue floor
+        against Assignments' 2h -- Peter's explicit 2026-07-29 call that
+        tasks nagged late need harder nagging once missed. The 2h hard
+        floor he asked for later overrides it: both now clamp to 2h and
+        the distinction is dead AT THE FLOOR.
+
+        It still exists above the floor (see
+        test_task_alpha_differs_from_assignment), where the type alphas
+        genuinely differ. Recorded rather than deleted so the next person
+        to widen TASK_FLOOR knows why it appears to do nothing.
         """
         task = CADENCE.interval_hours("Tasks", -0.5, "Medium", "x")
         assignment = CADENCE.interval_hours("Assignments", -0.5, "Medium", "x")
-        self.assertLess(task, assignment)
-        self.assertAlmostEqual(task, 1.0)
-        self.assertAlmostEqual(assignment, 2.0)
+        self.assertAlmostEqual(task, CADENCE.min_interval)
+        self.assertAlmostEqual(assignment, CADENCE.min_interval)
 
-    def test_priority_multiplies_the_whole_thing_including_the_floor(self):
-        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", -0.5, "High", "x"), 1.0)
-        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", -0.5, "Medium", "x"), 2.0)
-        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", -0.5, "Low", "x"), 4.0)
+    def test_priority_still_multiplies_above_the_hard_floor(self):
+        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", 5, "High", "x"), 10.0)
+        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", 5, "Medium", "x"), 20.0)
+        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", 5, "Low", "x"), 40.0)
+
+    def test_hard_floor_collapses_high_and_medium_when_freshly_overdue(self):
+        """
+        Consequence of the 2h floor, recorded deliberately: High no
+        longer nags faster than Medium on a just-overdue item, because
+        both land under the floor. Low still differs (4h).
+        """
+        high = CADENCE.interval_hours("Assignments", -0.5, "High", "x")
+        medium = CADENCE.interval_hours("Assignments", -0.5, "Medium", "x")
+        low = CADENCE.interval_hours("Assignments", -0.5, "Low", "x")
+        self.assertAlmostEqual(high, medium)
+        self.assertAlmostEqual(high, CADENCE.min_interval)
+        self.assertAlmostEqual(low, 4.0)
 
     def test_missing_priority_defaults_to_medium(self):
         self.assertAlmostEqual(
@@ -187,18 +205,21 @@ class CadenceFormula(unittest.TestCase):
             CADENCE.interval_hours("Assignments", -5, "Medium", "x"),
         )
 
-    def test_absolute_minimum_safety_rail(self):
-        # A pathological combination of a tiny floor and an aggressive
-        # priority multiplier still can't go below the hard minimum.
+    def test_hard_floor_survives_pathological_tuning(self):
+        # A tiny floor plus an aggressive priority multiplier still
+        # cannot produce anything faster than min_interval.
         tiny = Cadence(
             assignment_floor=0.01,
             priority_multiplier={"High": 0.1, "Medium": 1.0, "Low": 2.0},
             jitter_fraction=0.0,
         )
         self.assertEqual(
-            tiny.interval_hours("Assignments", -5, "High", "x"),
-            reminders.ABSOLUTE_MIN_INTERVAL_HOURS,
+            tiny.interval_hours("Assignments", -5, "High", "x"), tiny.min_interval
         )
+
+    def test_hard_floor_defaults_to_two_hours(self):
+        self.assertEqual(reminders.DEFAULT_MIN_INTERVAL_HOURS, 2.0)
+        self.assertEqual(Cadence().min_interval, 2.0)
 
 
 class JitterFactor(unittest.TestCase):
@@ -400,8 +421,7 @@ class RecurringReminders(unittest.TestCase):
             cadence=CADENCE,
         )
         self.assertEqual(r.title, "📝 Assignment reminder")
-        # Same-day previous reminder, so it now carries the repeat marker.
-        self.assertEqual(r.body, "Algebra Work — due today at 9:00 AM · again, last 6:00 AM")
+        self.assertEqual(r.body, "Algebra Work — due today at 9:00 AM")
         self.assertEqual(r.priority, 4)
 
     def test_overdue_wording(self):
@@ -858,55 +878,96 @@ class CategoryEmojiInTitle(unittest.TestCase):
         self.assertNotIn(" · ", r.body)
 
 
-class RepeatMarker(unittest.TestCase):
+
+
+class HardMinimumInterval(unittest.TestCase):
     """
-    Repeats stack on iOS and cannot be collapsed: ntfy's X-Sequence-ID
-    replacement is a client feature its docs list for the web and Android
-    apps only, and three messages sharing a sequence id arrived as three
-    separate notifications on Peter's iPhone (confirmed by eye
-    2026-07-30). Since they stack, they must be tellable apart.
+    Peter's rule (2026-07-30): the same item can never notify twice
+    within two hours, by any path. Repeats stack on iOS and can't be
+    collapsed, so the only real defense is not generating them.
+
+    due_for_reminder enforces this on top of the cadence math, so it
+    holds even for paths that never touch interval_hours -- Events'
+    fixed tiers especially.
     """
 
-    def _r(self, last_reminded, now="2026-07-30T13:00", **kw):
-        kw.setdefault("due_date", "2026-07-30")
-        return reminders.due_for_reminder(
-            item(last_reminded=last_reminded, category="AP Lang", **kw),
-            at(now),
-            cadence=CADENCE,
+    def test_recurring_item_is_refused_inside_the_window(self):
+        now = at("2026-07-30T13:00")
+        self.assertIsNone(
+            reminders.due_for_reminder(
+                item(due_date="2026-07-25", last_reminded=(now - timedelta(minutes=90)).isoformat()),
+                now,
+                cadence=CADENCE,
+            )
         )
 
-    def test_first_reminder_of_the_day_has_no_marker(self):
-        r = self._r("2026-07-29T18:00:00-06:00")
-        self.assertNotIn("again", r.body)
-
-    def test_a_repeat_names_the_previous_reminder_time(self):
-        r = self._r("2026-07-30T09:25:00-06:00")
-        self.assertIn("again, last 9:25 AM", r.body)
-
-    def test_two_repeats_in_one_day_are_not_identical(self):
-        """The whole point: a stack of cards must be distinguishable."""
-        first = self._r("2026-07-29T18:00:00-06:00")
-        second = self._r("2026-07-30T09:25:00-06:00")
-        third = self._r("2026-07-30T10:50:00-06:00")
-        self.assertEqual(len({first.body, second.body, third.body}), 3)
-
-    def test_uses_calendar_day_not_a_24_hour_window(self):
-        """
-        11pm yesterday to 6am today is 7 hours apart but is NOT the same
-        day's nagging. This file has shipped the 24-hour-bucket bug twice
-        before; pinning the calendar-day reading here.
-        """
-        r = self._r("2026-07-29T23:00:00-06:00", now="2026-07-30T06:00")
-        self.assertNotIn("again", r.body)
-
-    def test_marker_survives_the_overdue_path_too(self):
-        r = self._r("2026-07-30T05:00:00-06:00", now="2026-07-30T22:00", due_date="2026-07-27")
-        self.assertIn("was due 3 days ago", r.body)
-        self.assertIn("again, last 5:00 AM", r.body)
-
-    def test_capture_never_carries_a_repeat_marker(self):
-        """Capture fires exactly once — there is nothing to repeat."""
-        r = reminders.due_for_reminder(
-            item(last_reminded=None), at("2026-07-30T13:00"), cadence=CADENCE
+    def test_recurring_item_is_allowed_outside_the_window(self):
+        now = at("2026-07-30T13:00")
+        self.assertIsNotNone(
+            reminders.due_for_reminder(
+                item(due_date="2026-07-25", last_reminded=(now - timedelta(hours=30)).isoformat()),
+                now,
+                cadence=CADENCE,
+            )
         )
-        self.assertNotIn("again", r.body)
+
+    def test_event_tiers_cannot_land_within_the_window(self):
+        """
+        The case the cadence clamp alone would miss. A 9am event fires
+        its morning-of tier at 07:00 and its 1-hour-before tier at 08:00
+        -- one hour apart. The hard floor is what stops that pair.
+        """
+        ev = item(
+            type_name="Events",
+            due_date="2026-08-07T09:00:00-06:00",
+            last_reminded="2026-08-07T07:00:00-06:00",  # morning-of just fired
+        )
+        self.assertIsNone(
+            reminders.due_for_reminder(ev, at("2026-08-07T08:00"), cadence=CADENCE)
+        )
+
+    def test_event_hour_before_still_fires_when_far_enough_from_the_last(self):
+        """The floor must not swallow the hour-before reminder outright
+        -- an evening event's morning-of fired long ago."""
+        ev = item(
+            type_name="Events",
+            due_date="2026-08-07T19:00:00-06:00",
+            last_reminded="2026-08-07T07:00:00-06:00",
+        )
+        r = reminders.due_for_reminder(ev, at("2026-08-07T18:00"), cadence=CADENCE)
+        self.assertIsNotNone(r)
+        self.assertIn("starts in 1 hour", r.body)
+
+    def test_capture_is_unaffected(self):
+        """A brand-new item has no Last Reminded, so nothing to compare
+        against -- capture must still announce immediately."""
+        self.assertIsNotNone(
+            reminders.due_for_reminder(
+                item(last_reminded=None), at("2026-07-30T13:00"), cadence=CADENCE
+            )
+        )
+
+    def test_quiet_hours_do_not_consume_a_slot_inside_the_window(self):
+        """The floor is checked BEFORE the quiet-hours transform, so a
+        blocked reminder isn't silently stamped either."""
+        now = at("2026-07-30T02:00")
+        self.assertIsNone(
+            reminders.due_for_reminder(
+                item(due_date="2026-07-25", last_reminded=(now - timedelta(minutes=30)).isoformat()),
+                now,
+                cadence=CADENCE,
+            )
+        )
+
+    def test_unparseable_stamp_raises_rather_than_silencing(self):
+        """
+        Deliberate: a corrupt Last Reminded must fail LOUDLY, not make
+        the item quietly unable to ever remind again. pipeline.py catches
+        this per item and turns the run red -- the project's error policy.
+        """
+        with self.assertRaises(ValueError):
+            reminders.due_for_reminder(
+                item(due_date="2026-07-25", last_reminded="not-a-date"),
+                at("2026-07-30T13:00"),
+                cadence=CADENCE,
+            )
