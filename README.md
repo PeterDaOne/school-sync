@@ -85,10 +85,31 @@ print('Refresh token:', flow.run_local_server(port=0).refresh_token)
 "
 ```
 
-`OAUTHLIB_RELAX_TOKEN_SCOPE=1` is required, not optional: Google hands
-back `classroom.student-submissions.me.readonly` in place of
-`classroom.coursework.me.readonly`, and oauthlib treats that rename as
-a mismatch and raises. The refresh token doesn't expire unless revoked.
+`OAUTHLIB_RELAX_TOKEN_SCOPE=1` is required, not optional. Google renames
+**both** Classroom coursework scopes on grant (verified live 2026-07-30
+against `tokeninfo`):
+
+| Requested | Actually granted |
+|---|---|
+| `classroom.coursework.me.readonly` | `classroom.student-submissions.me.readonly` |
+| `classroom.coursework.students.readonly` | `classroom.student-submissions.students.readonly` |
+
+oauthlib treats that rename as a mismatch and raises without the relax
+flag. The refresh token doesn't expire unless revoked.
+
+**This makes scope strings useless for diagnosis, and actively
+misleading.** Even with the flag set, oauthlib prints
+
+```
+Not all requested scopes were granted by the authorization server,
+missing scopes .../classroom.coursework.me.readonly,
+.../classroom.coursework.students.readonly
+```
+
+on *every token refresh*, including when everything is working. It goes
+to stderr, so it lands in `sync-error.log`. Ignore it. **The only real
+test is whether an API call returns 200** — checking a granted-scope list
+against the requested names will tell you a working token is broken.
 
 **Why `gmail.modify`, when everything else is read-only?** It's used for
 exactly one thing: adding a hidden `school-sync/seen` label to messages

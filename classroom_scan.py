@@ -44,7 +44,7 @@ from datetime import datetime, timedelta, timezone
 
 from googleapiclient.errors import HttpError
 
-from shared import classmap, config, googleauth, notion_client, timeutil
+from shared import classmap, config, googleauth, notion_client, tasktype, timeutil
 
 CLASSROOM_SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
@@ -91,11 +91,21 @@ def _raise_if_insufficient_scope(e: HttpError):
     if e.resp.status in (401, 403) and ("scope" in body or "permission" in body):
         raise RuntimeError(
             "Google Classroom API rejected the request for insufficient OAuth "
-            "scope. The refresh token in .env / GitHub secrets doesn't carry "
-            "classroom.courses.readonly and classroom.coursework.me.readonly "
-            "yet — re-run the OAuth consent flow (see README) with the "
-            "expanded scope list and update GOOGLE_REFRESH_TOKEN everywhere "
-            "it is stored."
+            "scope. Re-run the consent flow (README section 2) and update "
+            "GOOGLE_REFRESH_TOKEN in ALL THREE places: .env, the launchd "
+            "plist (python3 generate_plist.py, then reload), and the GitHub "
+            "secret. Missing the GitHub secret is the usual cause -- "
+            "classroom_scan only runs in the cloud, so a token that works "
+            "locally proves nothing about production.\n"
+            "\n"
+            "Do NOT diagnose this by comparing scope strings: Google renames "
+            "both Classroom coursework scopes on grant "
+            "(coursework.me.readonly -> student-submissions.me.readonly, and "
+            "coursework.students.readonly -> "
+            "student-submissions.students.readonly). oauthlib prints a "
+            "'Not all requested scopes were granted' warning about them on "
+            "every refresh even when everything works. Check whether the API "
+            "call actually returns 200, not what the scope list says."
         ) from e
     raise
 
@@ -233,7 +243,16 @@ def _due_date_iso(coursework: dict) -> str | None:
     date_str = f"{d['year']:04d}-{d['month']:02d}-{d['day']:02d}"
 
     t = coursework.get("dueTime")
-    if not t:
+    # `is None`, NOT a falsiness check. Google serializes TimeOfDay as
+    # proto3 JSON, which OMITS zero-valued fields -- so midnight UTC
+    # arrives as the empty dict `{}`, not as {"hours": 0}. `if not t`
+    # treated that as "no time set" and returned a bare calendar day.
+    # Midnight UTC is 6pm the previous day in Mountain, so an assignment
+    # due 6:00 PM landed in Notion as all-day on the FOLLOWING date --
+    # read downstream as 23:59, ~30 hours late. An absent key means
+    # all-day; a present-but-empty one means every component is zero,
+    # which the .get() defaults below already handle correctly.
+    if t is None:
         return date_str  # all-day: a calendar day carries no timezone
 
     utc = datetime(
@@ -263,10 +282,14 @@ def run(known_ids: set[str] | None = None):
 
     # Read once: Notion invents any select option it's handed, so course
     # names are matched against what already exists rather than sent raw.
+    # Same hazard on Task Type (multi-select) and Priority.
     category_options = notion_client.select_option_names(notion_client.CATEGORY_PROP)
+    task_type_options = notion_client.select_option_names(notion_client.TASK_TYPE_PROP)
+    priority_options = notion_client.select_option_names(notion_client.PRIORITY_PROP)
 
     added = skipped = submitted = unmatched = 0
     capped = False
+    failures: list[str] = []
 
     for course in courses:
         if capped:
@@ -307,14 +330,33 @@ def run(known_ids: set[str] | None = None):
                 )
                 break
 
-            notion_client.create_item(
-                name=work["title"],
-                category=category,
-                due_date=_due_date_iso(work),
-                source="Classroom",
-                type_name="Assignments",
-                external_id=external_id,
-            )
+            # Per item, per the project's error policy (see
+            # shared/pipeline.py): one assignment Notion rejects -- an
+            # over-long title, a due date it won't accept -- must not
+            # stop the rest of the course importing. Bare, this aborted
+            # the whole sweep, and since a failed create writes no
+            # External ID it would abort again on every subsequent run,
+            # permanently blocking every assignment behind it.
+            try:
+                notion_client.create_item(
+                    name=work["title"],
+                    category=category,
+                    due_date=_due_date_iso(work),
+                    source="Classroom",
+                    type_name="Assignments",
+                    external_id=external_id,
+                    task_type=tasktype.resolve(
+                        work["title"], "Assignments", task_type_options
+                    ),
+                    priority=tasktype.priority(work["title"], priority_options),
+                )
+            except Exception as e:
+                failures.append(f"{work.get('title', work['id'])!r}: {e}")
+                print(
+                    f"[classroom_scan] could not import {work.get('title')!r}: {e}",
+                    file=sys.stderr,
+                )
+                continue
             known_ids.add(external_id)
             added += 1
 
@@ -323,6 +365,16 @@ def run(known_ids: set[str] | None = None):
             f"[classroom_scan] added {added}, skipped {skipped} already captured, "
             f"{submitted} already turned in"
             + (f", {unmatched} course(s) with no Class match" if unmatched else "")
+        )
+
+    # Raised only after every other item has had its chance. cloud_sync's
+    # _run_phase turns this into a red run rather than a silent partial
+    # success -- the other half of the policy: tolerate per item, but
+    # never let a broken sweep look healthy.
+    if failures:
+        raise RuntimeError(
+            f"{len(failures)} Classroom item(s) could not be imported: "
+            + "; ".join(failures)
         )
 
 
