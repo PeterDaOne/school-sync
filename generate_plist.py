@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from shared import config
+from shared import config, reminders
 
 LABEL = "com.peter.schoolsync"
 LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
@@ -52,25 +52,18 @@ REQUIRED_KEYS = [
 # (ANTHROPIC_API_KEY, SCHOOL_EMAIL_HINTS, CLOUD_*, CLASSROOM_*) are
 # deliberately excluded: local_sync never reads them, and leaving them
 # out keeps one fewer copy of a secret on disk.
+#
+# The reminder tunables are IMPORTED rather than restated. Hand-listing
+# them here drifted from the workflow's own list once already: five knobs
+# added 2026-07-30 reached the cloud and never reached the Mac, so
+# setting one in .env would have tuned only half the system, silently.
+# See reminders.TUNABLE_ENV_VARS.
 OPTIONAL_KEYS = [
     "NTFY_SERVER",
     "NTFY_COMMAND_TOPIC",
     "SCHOOL_TIMEZONE",
     "GOOGLE_CALENDAR_TIMEZONE",
-    "QUIET_HOURS_START",
-    "QUIET_HOURS_END",
-    "ASSIGNMENT_ALPHA_HOURS_PER_DAY",
-    "ASSIGNMENT_FLOOR_HOURS",
-    "ASSIGNMENT_CEILING_HOURS",
-    "TASK_ALPHA_HOURS_PER_DAY",
-    "TASK_FLOOR_HOURS",
-    "TASK_CEILING_HOURS",
-    "PRIORITY_MULTIPLIER_HIGH",
-    "PRIORITY_MULTIPLIER_MEDIUM",
-    "PRIORITY_MULTIPLIER_LOW",
-    "REMINDER_JITTER_FRACTION",
-    "MAX_NOTIFICATIONS_PER_PASS",
-    "EVENT_REMINDER_HOUR",
+    *reminders.TUNABLE_ENV_VARS,
 ]
 
 

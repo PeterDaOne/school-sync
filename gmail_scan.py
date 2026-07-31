@@ -66,6 +66,7 @@ run once per candidate email, so cost per call is the whole ballgame.
 
 import json
 import sys
+from urllib.parse import quote
 
 from googleapiclient.errors import HttpError
 
@@ -80,7 +81,36 @@ GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
 ]
 
-SEEN_LABEL = "school-sync/seen"
+# VERSIONED ON PURPOSE — bump the suffix whenever the capture POLICY
+# changes (CLASSIFIER_SYSTEM, the schema, or what counts as a candidate).
+#
+# The label is permanent but the policy is not, and that combination
+# silently lost a real item on 2026-07-31. The scope was widened from
+# schoolwork-only to "anything a real person asks Peter to do" at
+# 22:17Z. A chore email ("mow the grass") had been classified and
+# correctly rejected at ~22:10 under the OLD narrow policy — and because
+# rejections are labelled, the `-label:` clause excluded it from every
+# subsequent run forever. It could never be reconsidered under the rules
+# that would have captured it.
+#
+# Bumping the version leaves the old label in place but stops excluding
+# it, so every previously-rejected message gets exactly one fresh look
+# under the new policy. Cost is bounded by the window and by
+# MAX_CLASSIFICATIONS_PER_RUN; the alternative is silent permanent loss.
+SEEN_LABEL = "school-sync/seen-v2"
+
+# Machine-generated bulk mail, excluded before Claude is ever called.
+# Gmail's own tab classifier is free and is very good at precisely the
+# distinction the model finds hardest — a marketing deadline versus a
+# real obligation.
+#
+# `updates` is deliberately NOT in this list even though it is where most
+# of the volume lives (excluding it took Peter's 7-day mailbox from 38
+# candidates to 11). Automated-but-real school notifications land in
+# Updates, and missing those is exactly the failure this filter is being
+# rewritten to fix. Paying for a few more classifications is much cheaper
+# than dropping one real assignment.
+EXCLUDED_CATEGORIES = ("promotions", "social", "forums")
 
 MODEL = "claude-sonnet-5"
 MAX_TOKENS = 1000
@@ -91,10 +121,18 @@ MAX_MESSAGES_PER_RUN = 20
 # instead of letting it scale with the cron frequency.
 MAX_CLASSIFICATIONS_PER_RUN = 10
 
-# With labelling, a wide window is free — a message is only ever looked
-# at once. Without it, every run re-examines everything in the window,
-# so the window itself is the only cost control left.
-LOOKBACK_WITH_LABEL = "newer_than:1d"
+# With labelling, a wide window is nearly free — a message is only ever
+# looked at once, so in steady state everything inside the window is
+# already labelled and the query returns almost nothing. Without it,
+# every run re-examines everything in the window, so the window itself is
+# the only cost control left.
+#
+# Widened from 1d to 7d on 2026-07-31. At 1d, any cloud outage longer
+# than a day lost that day's mail PERMANENTLY: the messages simply fell
+# out of scope, and the seen-label doesn't help with something that was
+# never a candidate in the first place. A week of slack costs nothing in
+# steady state and turns a permanent loss into a delayed capture.
+LOOKBACK_WITH_LABEL = "newer_than:7d"
 LOOKBACK_WITHOUT_LABEL = "newer_than:2h"
 
 # The Notion `Type` options. Kept as a constant because it is also the
@@ -235,21 +273,75 @@ def _seen_label_id(service) -> str | None:
 
 def _candidate_query(has_label: bool) -> str:
     """
-    Cheap pre-filter before spending a Claude call on anything. Domain
-    and keyword filters are ANDed: a candidate must come from a school
-    domain AND look assignment-shaped.
+    Cheap pre-filter before spending a Claude call on anything.
+
+    NO SUBJECT-KEYWORD WHITELIST — that was the bug, not the design
+    -------------------------------------------------------------
+    This used to require a subject matching assignment/due/homework/
+    project/essay/quiz/test. That made sense when the only thing being
+    captured was schoolwork. When the scope was widened on 2026-07-31 to
+    "anything a real person asks Peter to do", the whitelist was left
+    behind, and it silently became the thing that decided what could be
+    captured at all.
+
+    Measured against real mail that same day: of six genuine messages
+    (a chore, a birthday, a jiu jitsu tournament, two homework mails and
+    an essay), the domain filter matched all six and the keyword filter
+    matched TWO. "Birthday" and "Jiu jitsu tournament" contain no
+    schoolwork keyword and never reached the classifier at all — Peter
+    reported them as capture failures, and they were, one layer earlier
+    than anyone was looking.
+
+    The deeper problem is that the whitelist is unfixable in kind: there
+    is no finite list of words that covers "things a human might ask you
+    to do". Widening it is whack-a-mole.
+
+    So the positive filter is gone, replaced by a NEGATIVE one on
+    machine-generated bulk mail (see EXCLUDED_CATEGORIES). Gmail already
+    classifies that better than a keyword list ever could, for free. The
+    remaining cost control is the seen-label (one classification per
+    message, ever) plus MAX_CLASSIFICATIONS_PER_RUN.
     """
     hints = [h.strip() for h in config.optional("SCHOOL_EMAIL_HINTS").split(",") if h.strip()]
-    keywords = (
-        "subject:assignment OR subject:due OR subject:homework OR "
-        "subject:project OR subject:essay OR subject:quiz OR subject:test"
-    )
-    parts = [f"({keywords})", LOOKBACK_WITH_LABEL if has_label else LOOKBACK_WITHOUT_LABEL]
+    parts = [LOOKBACK_WITH_LABEL if has_label else LOOKBACK_WITHOUT_LABEL]
+    parts += [f"-category:{c}" for c in EXCLUDED_CATEGORIES]
     if hints:
         parts.insert(0, "(" + " OR ".join(f"from:{h}" for h in hints) + ")")
     if has_label:
         parts.append(f'-label:"{SEEN_LABEL}"')
     return " ".join(parts)
+
+
+def _mailbox_address(service) -> str | None:
+    """
+    The address of the mailbox being swept, used to build Source Links.
+
+    Gmail deep links need an account selector. The familiar form is
+    `/mail/u/0/`, but `u/0` means "the FIRST Google account signed in to
+    this browser", NOT "the account this message lives in". That is fine
+    today on one account and quietly wrong the moment Peter is signed
+    into both his school and personal accounts -- the link would open the
+    wrong mailbox and show nothing, which looks like a broken link rather
+    than a wrong one. `?authuser=<address>` names the account explicitly
+    and does not care about sign-in order.
+
+    One extra API call per run. Returns None on failure: a link is a
+    convenience, and losing it must never cost us a capture.
+    """
+    try:
+        return service.users().getProfile(userId="me").execute().get("emailAddress")
+    except Exception as e:
+        print(f"[gmail_scan] could not read mailbox address: {e}", file=sys.stderr)
+        return None
+
+
+def _message_link(message_id: str, address: str | None) -> str:
+    """Deep link to one message. `#all/` finds it whether or not it's archived."""
+    if address:
+        # `@` left literal (it is legal in a query string, and it is the
+        # form Google's own UI emits); everything else percent-encoded.
+        return f"https://mail.google.com/mail/?authuser={quote(address, safe='@')}#all/{message_id}"
+    return f"https://mail.google.com/mail/u/0/#all/{message_id}"
 
 
 def _mark_seen(service, message_id: str, label_id: str | None):
@@ -344,6 +436,8 @@ def run(known_ids: set[str] | None = None):
     client = anthropic.Anthropic(api_key=api_key)
     service = _gmail_service()
     label_id = _seen_label_id(service)
+    # Read once per run, not per message — see _mailbox_address.
+    mailbox = _mailbox_address(service)
 
     results = (
         service.users()
@@ -424,6 +518,11 @@ def run(known_ids: set[str] | None = None):
                     parsed["task_name"], item_type, task_type_options
                 ),
                 priority=tasktype.priority(parsed["task_name"], priority_options),
+                # One click from the Notion page back to the email this
+                # was inferred from. Worth more here than for Classroom:
+                # Gmail items are parsed out of prose, so checking the
+                # original is how Peter confirms a captured item is right.
+                source_link=_message_link(msg_ref["id"], mailbox),
             )
             known_ids.add(external_id)  # guard against duplicates within this run
             added += 1

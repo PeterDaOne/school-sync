@@ -4,8 +4,10 @@ One input, many outputs. You type or check things off in Notion.
 Calendar, phone reminders, and captured email/Classroom items stay
 current on their own.
 
-**Notion database:** https://app.notion.com/p/6524b82ad7dd499896f4c55a86de9290
-Database ID (for `.env`): `6524b82ad7dd499896f4c55a86de9290`
+Your `NOTION_DB_ID` is the 32-character hex string in your database's
+URL: `app.notion.com/<workspace>/<DATABASE_ID>?v=...`. Put it in `.env`,
+never here — this file is public, and there is no reason to publish a
+pointer at your own database.
 
 ---
 
@@ -27,8 +29,19 @@ The plist lives outside the repo on purpose — `generate_plist.py`
 writes it straight to `~/Library/LaunchAgents/`. Check before pushing:
 
 ```bash
-git status --porcelain && git ls-files | grep -E '\.env$|client_secret|\.plist$' || echo "clean — no secrets tracked"
+python3 scan_secrets.py
 ```
+
+That does two things `.gitignore` cannot. It confirms no secret-bearing
+file is tracked, **and** it greps every tracked file for the actual
+values in your `.env` — a token pasted into a README example or a
+domain quoted in a doc is invisible to `.gitignore` and has slipped
+through twice. It exits non-zero on a finding, so it can gate a push.
+
+It also treats `SCHOOL_EMAIL_HINTS` as sensitive. That is not a
+credential and leaking it breaks nothing, which is exactly why it got
+committed once — but on a public repo it names the real school of a
+minor, and that is the most personal thing in the config.
 
 If a secret ever does get committed, deleting it later is not enough —
 the old commit stays on GitHub. **Rotate the credential** (new Notion
@@ -257,6 +270,41 @@ block on the sync job is what makes running both safe: without it, a
 scheduled run and a dispatched run can overlap, read the same
 `Last Reminded`, and both send the same reminder.
 
+### 9. Two things that expire, and both fail silently
+
+The cloud path has two time-based single points of failure. Neither
+turns anything red. Both just stop, and the system keeps looking
+healthy while notifications quietly stop arriving.
+
+| What | When | What it looks like when it happens |
+|---|---|---|
+| **cron-job.org PAT** | 90 days from issue (~2026-10-27) | Dispatches start returning 401. The fallback `cron:` keeps working, so reminders still arrive — just ~110 min late instead of ~5. **Nothing looks broken.** |
+| **GitHub `schedule:` cron** | 60 days of repo inactivity (~2026-09-29 if nothing is pushed) | GitHub disables scheduled workflows on inactive repos. `workflow_dispatch` is unaffected, so this only bites once the PAT has *also* expired — at which point the cloud stops entirely. |
+
+The dangerous case is the overlap: the two windows are about a month
+apart, mid-semester, and neither raises anything.
+
+**Mitigations in place:**
+
+- cron-job.org's "notify me when execution fails" alarm is on. It
+  catches the dispatcher failing, including the 401 after PAT expiry.
+- GitHub emails you before a fine-grained PAT expires.
+- **Two `Tasks` were added to the Notion database itself** — "Renew
+  school-sync cron-job.org PAT" (due 2026-10-20) and "Check school-sync
+  GitHub schedule cron is still enabled" (due 2026-09-22), each with a
+  `Source Link` to the page you need. The reminder system reminds you to
+  maintain the reminder system, which is the only mechanism here that
+  doesn't depend on the thing that broke.
+- Any push to `main` resets the 60-day inactivity clock, so an actively
+  maintained repo never hits it.
+
+**If reminders ever go quiet for a day, check in this order:** is the
+cron-job.org job still firing → is the PAT still valid → is the
+`schedule:` workflow still enabled in the Actions tab. A proper dead
+man's switch (healthchecks.io or similar, pinged at the end of
+`cloud_sync`) would catch all three at once and is the obvious upgrade
+if this ever bites twice.
+
 ---
 
 ## Daily use
@@ -321,6 +369,23 @@ Key ideas worth knowing before you change anything:
   re-scan a trailing window every run; this is what stops that window
   from producing dozens of copies. It lives in Notion because GitHub's
   runners keep no state between runs.
+- **Source Link.** Captured items also carry a `Source Link` (Notion
+  `url` type) pointing at the Google Classroom assignment page or the
+  Gmail message they came from — one click from the Notion page back to
+  the original. Email items are inferred from prose, so this is how you
+  check one. Classroom links come from the API's own `alternateLink`
+  rather than being constructed: the URL embeds base64 of Google's
+  numeric IDs, and building it yourself would hardcode an undocumented
+  encoding. It is deliberately NOT put in the notification — tapping a
+  push opens the Notion page, and Notion stays the hub.
+- **Announcements are not nags.** A capture notification is the only
+  time an item is ever announced; a recurring reminder repeats by
+  design. `pipeline._allocate` therefore rations them separately, and
+  announcements are exempt from the daily notification budget. They are
+  self-limiting (an item can only be captured once), so there is no
+  runaway to guard against. Rationing them together meant a captured
+  assignment due the next day went unannounced for over three hours
+  while the budget was spent re-nagging stale junk.
 - **The sync grace window.** Writing `Last Synced` is itself an edit, so
   `state.py` allows 10 seconds of slack before treating an edit as new.
   Without it, every item re-syncs on every pass forever. If you ever see

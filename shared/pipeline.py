@@ -33,11 +33,17 @@ ERROR POLICY, stated deliberately rather than just made consistent:
     2026-07-29. Notifications are the product; silent total failure is
     the loudest thing this system can do wrong.
 
-  - A deferred reminder (skipped only because MAX_NOTIFICATIONS_PER_PASS
-    was already hit this pass) does NOT count toward the exit code —
-    unlike notify_failures, this is expected, routine behavior, not a
-    problem. Last Reminded is left untouched so it's simply retried next
-    pass (5 min away on the cloud path), same as a quiet-hours skip.
+  - A deferred reminder (skipped because MAX_NOTIFICATIONS_PER_PASS or
+    the daily budget was already spent) does NOT count toward the exit
+    code — unlike notify_failures, this is expected, routine behavior,
+    not a problem. Last Reminded is left untouched so it's simply
+    reconsidered next pass, same as a quiet-hours skip.
+
+    It is still reported in a way that distinguishes the two causes. A
+    pass-capped reminder goes out a minute later; a budget-blocked one
+    waits for midnight. Logging both as "deferred to next pass" is what
+    made a real 3h20m notification outage indistinguishable from normal
+    throttling on 2026-07-31.
 """
 
 import sys
@@ -60,10 +66,18 @@ class Report:
     # needs fixing and it will retry unprompted on the next pass. It
     # still has to affect the exit code: see `ok`.
     notify_failures: int = 0
-    # Reminders that were due but skipped purely because this pass
-    # already hit MAX_NOTIFICATIONS_PER_PASS. Routine, not a failure —
-    # see the module docstring's error policy.
+    # Reminders that were due but not sent this pass, because either
+    # MAX_NOTIFICATIONS_PER_PASS or the daily budget was already spent.
+    # Routine, not a failure — see the module docstring's error policy.
     deferred: int = 0
+    # True when the deferral above is the DAILY budget, not the per-pass
+    # cap. The distinction is the whole point: a pass-capped reminder
+    # really does go out on the next pass a minute later, but a
+    # budget-blocked one is held until midnight. Both used to log the
+    # identical phrase "deferred to next pass", which is how a genuine
+    # 3h20m outage on 2026-07-31 looked exactly like healthy throttling
+    # in sync.log — 137 consecutive passes of it.
+    budget_blocked: bool = False
     # Mark-done commands (from the notification action button, see
     # shared/commands.py) successfully applied this pass.
     commands_applied: int = 0
@@ -78,6 +92,7 @@ class Report:
     # both are the first things worth knowing when volume looks wrong.
     load_scale: float = 1.0
     sent_today: int = 0
+    daily_budget: int = 0
 
     @property
     def ok(self) -> bool:
@@ -90,7 +105,17 @@ class Report:
         if self.reminded:
             parts.append(f"sent {self.reminded} reminder(s)")
         if self.deferred:
-            parts.append(f"{self.deferred} reminder(s) deferred to next pass")
+            parts.append(
+                # Says "nag budget" because that is what it governs:
+                # capture announcements are exempt, so sent_today can
+                # legitimately exceed the cap on a day with a lot of new
+                # items. Reporting it as "15/6" read like a violation.
+                f"{self.deferred} reminder(s) held until tomorrow "
+                f"(nag budget of {self.daily_budget} spent; "
+                f"{self.sent_today} notification(s) sent today)"
+                if self.budget_blocked
+                else f"{self.deferred} reminder(s) deferred to next pass"
+            )
         if self.suppressed:
             parts.append(f"{self.suppressed} silenced by quiet hours")
         if self.commands_applied:
@@ -195,6 +220,7 @@ def run_sync_pass(
     sent_today = sum(i.get("reminders_today", 0) for _, i in parsed if _is_today(i))
     report.load_scale = cadence.load_scale
     report.sent_today = sent_today
+    report.daily_budget = cadence.daily_budget
 
     for page, item in parsed:
         try:
@@ -302,43 +328,73 @@ def _allocate(
     """
     Decide which of this pass's due reminders actually get sent.
 
-    Peter's rule (2026-07-30): guarantee every item one notification
-    before any item gets a second, then spend what's left on the most
-    urgent. So this runs in two phases:
+    ANNOUNCEMENTS ARE NOT NAGS, AND THE BUDGET MUST NOT TREAT THEM ALIKE
+    -------------------------------------------------------------------
+    This is the ordering rule that matters most, and getting it wrong was
+    a real, user-visible failure on 2026-07-31: a Gmail-captured
+    assignment sat in Notion, due the next day, and was never announced
+    for over three hours, while the daily budget was spent re-nagging two
+    stale junk Tasks Peter had already been told about days earlier. He
+    reasonably concluded the Gmail capture layer was broken. It wasn't —
+    the notification was.
 
-      1. Items with no reminder yet today are sent first, most urgent
-         first. Nothing can starve them — this is the guarantee.
-      2. Items that already had one today compete for `daily_budget`
-         slots, most urgent first.
+    Two things went wrong and both are fixed here:
 
-    Both phases are still bounded by max_per_pass, and anything not sent
-    is DEFERRED, never dropped: Last Reminded is untouched, so it is
-    reconsidered on the very next pass.
+      1. `_urgency` ranks by ntfy priority, and capture reminders used to
+         carry the default 3 while an overdue nag carries 5. So the ONE
+         message that says "this thing exists" always sorted BEHIND
+         messages about things Peter already knew about.
+      2. The daily budget was applied to both alike, so once it was
+         spent, announcements stopped entirely for the rest of the day.
 
-    `daily_budget` IS a true daily ceiling as of 2026-07-30, backed by
-    real per-item counts (notion_client.REMINDER_COUNT_PROP) rather than
-    the per-pass approximation it used to be. `sent_today` is the exact
-    number already delivered today, so the room left is
-    daily_budget - sent_today and it is enforced across BOTH phases,
-    including the guarantee.
+    A capture reminder is the only time an item is ever announced. Drop
+    it and that information is never re-sent — the item quietly joins the
+    recurring pool as though Peter had always known. A recurring reminder
+    is the opposite: repeating is its entire purpose, and one dropped
+    today is re-offered an interval later having lost nothing.
 
-    That last part is the deliberate tradeoff: on a heavy day the cap can
-    swallow an item's only notification of the day. It has to, or the cap
-    is not a cap. Load scaling exists to keep the cap from binding often
-    -- it stretches every interval as the workload grows, so at 24 items
-    the cadence produces far fewer candidates in the first place.
+    So announcements go FIRST and are exempt from the daily budget. That
+    is safe because they are self-limiting in a way nags are not: an item
+    can be captured exactly once (the capture branch fires only while
+    Last Reminded is unset), so the lifetime total is bounded by the
+    number of items that ever exist. There is no runaway to guard
+    against. `max_per_pass` still bounds a bulk import to a trickle.
+
+    Nags then take whatever budget is left, keeping Peter's 2026-07-30
+    two-phase rule among themselves:
+
+      1. Nags for items not yet reminded today go first, most urgent
+         first — the "one each before anyone gets a second" guarantee.
+      2. Items already reminded today compete for what remains.
+
+    Announcements sent this pass DO count against the nag budget. That is
+    deliberate: on a day with a lot of new items, Peter's attention is
+    already spent on real news, and stacking the usual nagging on top of
+    it is exactly the volume problem the budget exists to prevent.
 
     Nothing is dropped, only DEFERRED: Last Reminded is untouched for
     anything not sent, so it is reconsidered next pass (and tomorrow, on
     a fresh budget).
     """
-    room = max(0, cadence.daily_budget - sent_today)
     ordered = sorted(candidates, key=lambda c: _urgency(*c))
-    first_time = [c for c in ordered if c[0]["id"] not in reminded_today]
-    repeats = [c for c in ordered if c[0]["id"] in reminded_today]
 
-    sending = (first_time + repeats)[: min(room, cadence.max_per_pass)]
+    announcements = [c for c in ordered if c[1].kind == "capture"]
+    nags = [c for c in ordered if c[1].kind != "capture"]
+
+    # Exempt from the daily budget; bounded only by the per-pass cap.
+    sending = announcements[: cadence.max_per_pass]
+
+    # Whatever is left of both the daily budget and this pass's cap.
+    room = max(0, cadence.daily_budget - sent_today - len(sending))
+    slots_left = max(0, cadence.max_per_pass - len(sending))
+    first_time = [c for c in nags if c[0]["id"] not in reminded_today]
+    repeats = [c for c in nags if c[0]["id"] in reminded_today]
+    sending += (first_time + repeats)[: min(room, slots_left)]
+
     report.deferred += len(candidates) - len(sending)
+    # Distinguish "come back in a minute" from "come back tomorrow".
+    if report.deferred and room == 0:
+        report.budget_blocked = True
     return sending
 
 

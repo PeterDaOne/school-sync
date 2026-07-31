@@ -62,25 +62,18 @@ def main() -> int:
     log.install()
     failures: list[str] = []
 
-    # Self-heal the dedup property if Peter renamed or deleted it in the
-    # Notion UI — without it, both capture sweeps would silently start
-    # creating duplicates again.
+    # Self-heal any property we write that Peter renamed or deleted in
+    # the Notion UI. Each failure mode here is silent rather than loud:
+    # a missing External ID brings duplicates back, a missing Reminders
+    # Today reads as 0 and disables the daily cap, a missing Source Link
+    # drops links. See notion_client._MANAGED_PROPERTIES.
     try:
-        if notion_client.ensure_external_id_property():
-            print(f"[{SOURCE}] created missing '{notion_client.EXTERNAL_ID_PROP}' property")
+        created = notion_client.ensure_managed_properties()
+        if created:
+            print(f"[{SOURCE}] created missing propert(ies): {', '.join(created)}")
     except Exception as e:
-        failures.append(f"external-id property check: {e}")
-        print(f"[{SOURCE}] could not verify dedup property: {e}", file=sys.stderr)
-
-    # Same self-healing for the daily-count property. If it goes missing
-    # the counter reads 0 for every item, which silently disables the
-    # daily cap rather than failing loudly.
-    try:
-        if notion_client.ensure_reminder_count_property():
-            print(f"[{SOURCE}] created missing '{notion_client.REMINDER_COUNT_PROP}' property")
-    except Exception as e:
-        failures.append(f"reminder-count property check: {e}")
-        print(f"[{SOURCE}] could not verify counter property: {e}", file=sys.stderr)
+        failures.append(f"managed property check: {e}")
+        print(f"[{SOURCE}] could not verify our properties: {e}", file=sys.stderr)
 
     # One query feeds both sweeps' dedup checks — zero extra API calls.
     known_ids: set[str] = set()

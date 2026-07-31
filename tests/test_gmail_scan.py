@@ -48,17 +48,25 @@ class _Exec:
 class FakeGmail:
     """Mimics the users().labels()/messages() chains gmail_scan walks."""
 
-    def __init__(self, labels=None, messages=None, bodies=None, label_error=None):
+    def __init__(self, labels=None, messages=None, bodies=None, label_error=None,
+                 address="peter@example.com", profile_error=None):
         self._labels = list(labels or [])
         self._messages = list(messages or [])
         self._bodies = bodies or {}
         self._label_error = label_error
+        self._address = address
+        self._profile_error = profile_error
         self.created_labels = []
         self.modified = []
         self.queries = []
 
     def users(self):
         return self
+
+    def getProfile(self, userId=None):
+        if self._profile_error:
+            raise self._profile_error
+        return _Exec({"emailAddress": self._address})
 
     def labels(self):
         return _Labels(self)
@@ -111,25 +119,61 @@ class _Messages:
 
 
 class CandidateQuery(unittest.TestCase):
-    def test_domain_and_keyword_filters_are_anded(self):
+    def test_the_domain_filter_is_applied(self):
         with mock.patch.object(gmail_scan.config, "optional", return_value="school.edu"):
             q = gmail_scan._candidate_query(has_label=True)
         self.assertIn("(from:school.edu)", q)
-        self.assertIn("subject:assignment", q)
 
     def test_multiple_domain_hints_are_ored_together(self):
         with mock.patch.object(
-            gmail_scan.config, "optional", return_value="eldoradohs.org, aps.edu"
+            # Deliberately fake domains: this repo is public, and naming
+            # the real school of a minor in it is the one piece of PII
+            # the config actually holds. See scan_secrets.py.
+            gmail_scan.config, "optional", return_value="school.example, district.example"
         ):
             q = gmail_scan._candidate_query(has_label=True)
-        self.assertIn("(from:eldoradohs.org OR from:aps.edu)", q)
+        self.assertIn("(from:school.example OR from:district.example)", q)
 
     def test_no_hints_means_no_from_filter_rather_than_an_empty_one(self):
         """An empty `(from:)` clause would match nothing at all."""
         with mock.patch.object(gmail_scan.config, "optional", return_value=""):
             q = gmail_scan._candidate_query(has_label=True)
         self.assertNotIn("from:", q)
-        self.assertIn("subject:assignment", q)
+
+    def test_no_subject_keyword_whitelist(self):
+        """
+        REGRESSION GUARD, and the most important test in this class.
+
+        A subject whitelist made sense while only schoolwork was being
+        captured. Once the scope widened to "anything a real person asks
+        Peter to do", it silently became the thing deciding what could be
+        captured at all: of six real messages on 2026-07-31, it matched
+        two. A birthday and a jiu jitsu tournament never reached the
+        classifier, and were reported as capture failures.
+
+        There is no finite word list covering "things a human might ask
+        you to do". Do not reintroduce one.
+        """
+        with mock.patch.object(gmail_scan.config, "optional", return_value=""):
+            q = gmail_scan._candidate_query(has_label=True)
+        self.assertNotIn("subject:", q)
+
+    def test_machine_generated_categories_are_excluded(self):
+        with mock.patch.object(gmail_scan.config, "optional", return_value=""):
+            q = gmail_scan._candidate_query(has_label=True)
+        for category in ("promotions", "social", "forums"):
+            self.assertIn(f"-category:{category}", q)
+
+    def test_updates_is_deliberately_not_excluded(self):
+        """
+        Where automated-but-real school notification mail lands. Excluding
+        it is tempting (it is most of the volume) and would reintroduce
+        the exact class of silent miss this filter was rewritten to fix.
+        """
+        with mock.patch.object(gmail_scan.config, "optional", return_value=""):
+            q = gmail_scan._candidate_query(has_label=True)
+        self.assertNotIn("-category:updates", q)
+        self.assertNotIn("updates", gmail_scan.EXCLUDED_CATEGORIES)
 
     def test_with_the_label_the_window_is_wide_and_seen_mail_excluded(self):
         with mock.patch.object(gmail_scan.config, "optional", return_value=""):
@@ -147,6 +191,21 @@ class CandidateQuery(unittest.TestCase):
             q = gmail_scan._candidate_query(has_label=False)
         self.assertIn(gmail_scan.LOOKBACK_WITHOUT_LABEL, q)
         self.assertNotIn("-label:", q)
+
+
+class SeenLabelVersioning(unittest.TestCase):
+    def test_the_label_carries_a_version_suffix(self):
+        """
+        The label is permanent; the capture policy is not. A message
+        rejected under a narrow policy stays excluded forever unless the
+        label name changes with the policy — which is how a real chore
+        email was permanently lost on 2026-07-31, rejected seven minutes
+        before the rules that would have captured it went live.
+
+        Bump the suffix whenever CLASSIFIER_SYSTEM, the schema, or the
+        candidate query changes what can be captured.
+        """
+        self.assertRegex(gmail_scan.SEEN_LABEL, r"-v\d+$")
 
 
 class SeenLabel(unittest.TestCase):
@@ -205,6 +264,47 @@ def options_for(prop):
     }[prop]
 
 
+class MessageLink(unittest.TestCase):
+    """
+    The Source Link back to the original email.
+
+    Whether these URLs actually open the message can only be settled by
+    clicking one -- that was verified by hand against real mail. What is
+    pinned here is the shape, and specifically the account selector.
+    """
+
+    def test_names_the_account_explicitly_when_the_address_is_known(self):
+        # `u/0` means "first signed-in Google account", NOT "the account
+        # holding this message" -- so it opens the wrong mailbox once
+        # Peter is signed into both school and personal. authuser= is
+        # immune to sign-in order, which is the whole reason it is used.
+        link = gmail_scan._message_link("abc123", "peter@example.com")
+        self.assertEqual(
+            link, "https://mail.google.com/mail/?authuser=peter@example.com#all/abc123"
+        )
+
+    def test_falls_back_to_u0_when_the_address_is_unknown(self):
+        # getProfile failing must cost the better link, never the capture.
+        self.assertEqual(
+            gmail_scan._message_link("abc123", None),
+            "https://mail.google.com/mail/u/0/#all/abc123",
+        )
+
+    def test_uses_the_all_scope_so_archived_mail_still_resolves(self):
+        # Capture routinely archives nothing, but Peter does -- an #inbox
+        # link would 404 on anything he had already filed away.
+        self.assertIn("#all/", gmail_scan._message_link("abc123", "p@e.com"))
+
+    def test_the_address_is_url_encoded(self):
+        link = gmail_scan._message_link("abc123", "a b+c@example.com")
+        self.assertNotIn(" ", link)
+        self.assertIn("%20", link)
+
+    def test_a_profile_failure_degrades_instead_of_raising(self):
+        svc = FakeGmail(profile_error=http_error(403))
+        self.assertIsNone(gmail_scan._mailbox_address(svc))
+
+
 class Run(unittest.TestCase):
     """The sweep, with _classify_email stubbed -- see module docstring."""
 
@@ -252,6 +352,29 @@ class Run(unittest.TestCase):
         self.assertEqual(item["name"], ASSIGNMENT["task_name"])
         self.assertEqual(item["source"], "Email")
         self.assertEqual(item["external_id"], "gmail:m1")
+
+    def test_a_captured_item_carries_a_link_back_to_the_email(self):
+        svc = FakeGmail(
+            labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}],
+            messages=["m1"],
+            address="peter@example.com",
+        )
+        self._run(svc, [ASSIGNMENT])
+        self.assertEqual(
+            self.created[0]["source_link"],
+            "https://mail.google.com/mail/?authuser=peter@example.com#all/m1",
+        )
+
+    def test_the_link_still_works_when_the_profile_cannot_be_read(self):
+        svc = FakeGmail(
+            labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}],
+            messages=["m1"],
+            profile_error=http_error(403),
+        )
+        self._run(svc, [ASSIGNMENT])
+        self.assertEqual(
+            self.created[0]["source_link"], "https://mail.google.com/mail/u/0/#all/m1"
+        )
 
     def test_the_title_carries_no_prefix(self):
         """

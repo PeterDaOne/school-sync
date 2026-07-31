@@ -166,13 +166,25 @@ class _Submissions:
         )
 
 
-def work_item(work_id, hours_ago=1.0, title="Some Work"):
+# Distinguishes "caller said nothing" from "caller explicitly wants no
+# alternateLink", which is a real case: the field is absent on drafts.
+_DEFAULT_LINK = object()
+
+
+def work_item(work_id, hours_ago=1.0, title="Some Work", alternate_link=_DEFAULT_LINK):
     updated = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
-    return {
+    item = {
         "id": work_id,
         "title": title,
         "updateTime": updated.isoformat().replace("+00:00", "Z"),
     }
+    # Real coursework always carries alternateLink (verified live against
+    # Peter's own course, 2026-07-31).
+    if alternate_link is _DEFAULT_LINK:
+        item["alternateLink"] = f"https://classroom.google.com/c/CID/a/{work_id}/details"
+    elif alternate_link is not None:
+        item["alternateLink"] = alternate_link
+    return item
 
 
 class DueDateIso(unittest.TestCase):
@@ -418,6 +430,29 @@ class RunErrorPolicy(unittest.TestCase):
         self.assertEqual(created[0]["source"], "Classroom")
         self.assertEqual(created[0]["type_name"], "Assignments")
         self.assertEqual(created[0]["external_id"], "classroom:871376160217:w1")
+
+    def test_a_captured_item_carries_googles_link_to_the_assignment(self):
+        created, _ = self._run(None, [work_item("w1", title="Essay")])
+        self.assertEqual(
+            created[0]["source_link"],
+            "https://classroom.google.com/c/CID/a/w1/details",
+        )
+
+    def test_the_link_is_passed_through_not_reconstructed(self):
+        # The real URL embeds base64 of Google's numeric ids, so building
+        # it ourselves would hardcode an undocumented encoding. Whatever
+        # the API returns is what gets stored, verbatim.
+        odd = "https://classroom.google.com/c/ODcxMzc2MTYwMjE3/a/ODcxNDI2NjU2MDc5/details"
+        created, _ = self._run(None, [work_item("w1", alternate_link=odd)])
+        self.assertEqual(created[0]["source_link"], odd)
+
+    def test_a_missing_link_is_none_rather_than_fatal(self):
+        # Drafts have no alternateLink. A missing convenience must never
+        # cost the capture itself.
+        created, error = self._run(None, [work_item("w1", alternate_link=None)])
+        self.assertIsNone(error)
+        self.assertEqual(len(created), 1)
+        self.assertIsNone(created[0]["source_link"])
 
     def test_an_already_captured_assignment_is_not_recreated(self):
         created = []

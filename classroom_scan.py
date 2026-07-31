@@ -23,12 +23,19 @@ Classroom edit will not stomp his version. Notion stays the hub.
 
 LOOKBACK
 --------
-CLASSROOM_LOOKBACK_HOURS (default 48) bounds the scan. It's wider than
-the sync interval on purpose — a day of downtime shouldn't lose an
-assignment, and dedup makes the overlap free. To backfill an existing
-course at setup time, run once with a large value (e.g. 8760 for a
-year); MAX_NEW_PER_RUN caps how much a single run can import so an
-over-large lookback can't fire hundreds of notifications at once.
+CLASSROOM_LOOKBACK_HOURS (default 168 = 7 days) bounds the scan. It is
+much wider than the sync interval on purpose: anything posted during an
+outage longer than the window is lost permanently and silently, so the
+window is really "how long can the cloud be broken before assignments
+start disappearing". Dedup makes the overlap nearly free.
+
+To backfill an existing course at setup time, run once with a large
+value (e.g. 8760 for a year). MAX_NEW_PER_RUN caps how much a single
+run imports — but note it does NOT cap notifications overall: every
+imported item is newly captured and therefore owes a capture
+notification, delivered at MAX_NOTIFICATIONS_PER_PASS per pass until
+they are all out. A year-long backfill means a lot of phone buzzing.
+Do it once, deliberately, and expect the trickle.
 
 Scopes: classroom.courses.readonly + classroom.coursework.me.readonly +
 classroom.coursework.students.readonly (added 2026-07-30, see
@@ -57,7 +64,18 @@ CLASSROOM_SCOPES = [
     "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
 ]
 
-DEFAULT_LOOKBACK_HOURS = 48.0
+# Widened 48h -> 168h (7 days) on 2026-07-31, alongside the same change
+# to gmail_scan's window and for the same reason: at 48h, a cloud outage
+# longer than two days lost every assignment posted during it,
+# PERMANENTLY. The work simply aged out of the scan and nothing ever
+# looked at it again — a silent failure with no trace anywhere.
+#
+# The overlap is genuinely cheap here. Dedup is by External ID against an
+# index cloud_sync has already built, so re-seeing a known assignment
+# costs one set lookup and no API call, and `orderBy=updateTime desc`
+# plus the early return means paging stops at the cutoff rather than
+# walking the whole course.
+DEFAULT_LOOKBACK_HOURS = 168.0
 MAX_NEW_PER_RUN = 25
 
 # Submission states that mean Peter has already handed the work in.
@@ -348,6 +366,16 @@ def run(known_ids: set[str] | None = None):
                         work["title"], "Assignments", task_type_options
                     ),
                     priority=tasktype.priority(work["title"], priority_options),
+                    # Google's own link to the assignment page. Free --
+                    # _recent_coursework already fetched the whole
+                    # courseWork object, so this costs no extra call.
+                    #
+                    # Taken from the API rather than constructed: the URL
+                    # is /c/<base64 course id>/a/<base64 work id>/details,
+                    # so building it ourselves would mean hardcoding an
+                    # undocumented encoding of Google's ids. Verified
+                    # present on live coursework 2026-07-31.
+                    source_link=work.get("alternateLink"),
                 )
             except Exception as e:
                 failures.append(f"{work.get('title', work['id'])!r}: {e}")

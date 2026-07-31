@@ -25,6 +25,7 @@ Live schema, re-verified by raw curl 2026-07-30:
     Last Synced     date      written by us, not the user
     Last Reminded   date      written by us, not the user
     External ID     rich_text written by us — capture dedup key
+    Source Link     url       written by us — link back to the original
     Reminders Today number    written by us — backs the daily cap
     Days Until Due  formula   for Peter's views only; see reminders.py
     Resources       rich_text reserved for a later phase, untouched
@@ -70,6 +71,19 @@ REMINDER_COUNT_PROP = "Reminders Today"
 # Notion silently creates any select OR multi-select option it is handed.
 TASK_TYPE_PROP = "Task Type"
 PRIORITY_PROP = "Priority"
+
+# Clickable link back to wherever a captured item came from: the Google
+# Classroom assignment page, or the Gmail message. Only set for captured
+# items -- a manually typed one has no source to point at.
+#
+# Named "Source Link", not "Source": `Input Type` already answers what
+# KIND of source it was (Manual / Email / Syllabus / Classroom), and a
+# bare "Source" reads like a duplicate of it.
+#
+# Notion type `url`, not `rich_text`: only `url` renders as an actually
+# clickable link. (The separate `Resources` rich_text property is
+# reserved for a later phase and is deliberately left alone.)
+SOURCE_LINK_PROP = "Source Link"
 
 MAX_ATTEMPTS = 5
 
@@ -200,6 +214,7 @@ def create_item(
     external_id: str | None = None,
     task_type: list[str] | None = None,
     priority: str | None = None,
+    source_link: str | None = None,
 ):
     """
     Used by the Gmail and Classroom sweeps to add an item Peter hasn't
@@ -238,6 +253,10 @@ def create_item(
         properties[EXTERNAL_ID_PROP] = {
             "rich_text": [{"text": {"content": external_id}}]
         }
+    # One click from the Notion page back to the original assignment or
+    # email. Omitted entirely when absent -- a manual item has no source.
+    if source_link:
+        properties[SOURCE_LINK_PROP] = {"url": source_link}
     properties = {k: v for k, v in properties.items() if v is not None}
 
     return _request(
@@ -329,6 +348,7 @@ def extract_fields(page: dict) -> dict:
         "source": _select(props.get("Input Type")) or "Manual",
         "last_reminded": _date(props.get("Last Reminded")),
         "external_id": _rich_text(props.get(EXTERNAL_ID_PROP)),
+        "source_link": (props.get(SOURCE_LINK_PROP) or {}).get("url"),
         # Only meaningful alongside last_reminded -- it counts sends on
         # the day that stamp names. pipeline decides whether that day is
         # today; extract_fields stays a faithful read.
@@ -341,42 +361,43 @@ def extract_fields(page: dict) -> dict:
     }
 
 
-def ensure_reminder_count_property() -> bool:
+# The properties this system WRITES, and their Notion schema. Peter edits
+# the database by hand in the Notion UI between sessions, so each of these
+# is recreated if it goes missing rather than left to fail -- and in two
+# of the three cases the failure would be silent rather than loud, which
+# is the real reason this exists:
+#
+#   External ID     missing -> capture dedup breaks, duplicates return
+#   Reminders Today missing -> reads as 0, silently disabling the daily cap
+#   Source Link     missing -> links are silently dropped from new items
+#
+# Properties Peter owns (Title, Type, For, Priority, Status, Due Date,
+# Input Type, Task Type) are deliberately NOT here: recreating one of his
+# would paper over a rename he made on purpose.
+_MANAGED_PROPERTIES = {
+    EXTERNAL_ID_PROP: {"rich_text": {}},
+    REMINDER_COUNT_PROP: {"number": {}},
+    SOURCE_LINK_PROP: {"url": {}},
+}
+
+
+def ensure_managed_properties() -> list[str]:
     """
-    Make sure the daily-count property exists, creating it if not. Same
-    self-healing reasoning as ensure_external_id_property: Peter edits
-    this schema by hand, and a missing counter would silently disable the
-    daily cap rather than fail loudly.
+    Create any of our own properties that have gone missing. Returns the
+    names created — an empty list is the normal case.
+
+    One GET covering all of them, rather than one per property: this was
+    two near-identical functions each issuing its own database read, and
+    adding Source Link would have made it three reads per cloud run to
+    answer a single question. Missing properties are also created in a
+    single PATCH.
     """
     db = _request("GET", f"/databases/{_database_id()}")
-    if REMINDER_COUNT_PROP in db.get("properties", {}):
-        return False
-    print(f"[notion] '{REMINDER_COUNT_PROP}' property missing — creating it", file=sys.stderr)
-    _request(
-        "PATCH",
-        f"/databases/{_database_id()}",
-        json={"properties": {REMINDER_COUNT_PROP: {"number": {}}}},
-    )
-    return True
-
-
-def ensure_external_id_property() -> bool:
-    """
-    Make sure the dedup property exists on the live database, creating
-    it if it doesn't. Safe to call every run — it's a no-op once present.
-
-    This is here because Peter edits the schema by hand in the Notion UI
-    between sessions. If the property gets renamed or deleted, capture
-    dedup would otherwise fail silently and start creating duplicates
-    again; this repairs it instead.
-    """
-    db = _request("GET", f"/databases/{_database_id()}")
-    if EXTERNAL_ID_PROP in db.get("properties", {}):
-        return False
-    print(f"[notion] '{EXTERNAL_ID_PROP}' property missing — creating it", file=sys.stderr)
-    _request(
-        "PATCH",
-        f"/databases/{_database_id()}",
-        json={"properties": {EXTERNAL_ID_PROP: {"rich_text": {}}}},
-    )
-    return True
+    existing = db.get("properties", {})
+    missing = {n: s for n, s in _MANAGED_PROPERTIES.items() if n not in existing}
+    if not missing:
+        return []
+    for name in sorted(missing):
+        print(f"[notion] '{name}' property missing — creating it", file=sys.stderr)
+    _request("PATCH", f"/databases/{_database_id()}", json={"properties": missing})
+    return sorted(missing)

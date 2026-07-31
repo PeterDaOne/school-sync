@@ -30,11 +30,6 @@ from . import timeutil
 SYNC_GRACE = timedelta(seconds=10)
 
 
-def utc_now_iso() -> str:
-    """Kept as a re-export so existing call sites stay valid."""
-    return timeutil.utc_now_iso()
-
-
 def needs_sync(notion_page: dict) -> bool:
     """
     True if a page has never been synced, or was edited more recently

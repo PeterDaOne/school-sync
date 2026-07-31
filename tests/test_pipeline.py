@@ -220,11 +220,14 @@ class Allocation(unittest.TestCase):
         c.for_load.return_value = c
         return c
 
-    def _cand(self, item_id, priority, due=None):
+    def _cand(self, item_id, priority, due=None, kind="recurring"):
         return (
             dict(ITEM, id=item_id, due_date=due, priority=None),
-            replace(REMINDER, priority=priority),
+            replace(REMINDER, priority=priority, kind=kind),
         )
+
+    def _capture(self, item_id, priority=3):
+        return self._cand(item_id, priority, kind="capture")
 
     def _allocate(self, candidates, reminded_today, sent_today=0, **kw):
         report = pipeline.Report()
@@ -295,6 +298,105 @@ class Allocation(unittest.TestCase):
         ids, report = self._allocate([], reminded_today=set())
         self.assertEqual(ids, [])
         self.assertEqual(report.deferred, 0)
+
+
+class CaptureAnnouncementsAreNotNags(unittest.TestCase):
+    """
+    REGRESSION GUARD for a real, user-visible failure on 2026-07-31.
+
+    A Gmail-captured assignment sat in Notion, due the next day, and was
+    never announced for 3h20m — 137 consecutive passes — while the daily
+    budget was spent re-nagging two stale junk Tasks Peter had been told
+    about days earlier. He reasonably concluded Gmail capture was broken.
+    It wasn't; the notification was.
+
+    A capture is the ONLY time an item is ever announced. A nag repeats
+    by construction. Rationing them identically loses information that is
+    never re-sent.
+    """
+
+    def _cadence(self, max_per_pass=10, daily_budget=6):
+        c = mock.Mock(max_per_pass=max_per_pass, daily_budget=daily_budget, load_scale=1.0)
+        c.for_load.return_value = c
+        return c
+
+    def _cand(self, item_id, priority, kind="recurring"):
+        return (
+            dict(ITEM, id=item_id, due_date=None, priority=None),
+            replace(REMINDER, priority=priority, kind=kind),
+        )
+
+    def _allocate(self, candidates, reminded_today=frozenset(), sent_today=0, **kw):
+        report = pipeline.Report()
+        with mock.patch.object(pipeline.reminders, "due_datetime", return_value=None):
+            sent = pipeline._allocate(
+                candidates, set(reminded_today), self._cadence(**kw), report, sent_today
+            )
+        return [c[0]["id"] for c in sent], report
+
+    def test_an_announcement_survives_a_fully_spent_budget(self):
+        """The exact 2026-07-31 failure, in one assertion."""
+        ids, _ = self._allocate(
+            [self._cand("new-assignment", 3, kind="capture")],
+            sent_today=6, daily_budget=6,
+        )
+        self.assertEqual(ids, ["new-assignment"])
+
+    def test_an_announcement_outranks_a_louder_overdue_nag(self):
+        """
+        ntfy priority alone put capture (3) behind overdue (5), so the one
+        message carrying new information sorted last.
+        """
+        ids, _ = self._allocate(
+            [self._cand("overdue-junk", 5), self._cand("brand-new", 3, kind="capture")],
+            max_per_pass=1,
+        )
+        self.assertEqual(ids, ["brand-new"])
+
+    def test_nags_are_still_capped_by_the_budget(self):
+        # The exemption must not leak into the nag path.
+        ids, report = self._allocate(
+            [self._cand(f"n{i}", 4) for i in range(3)], sent_today=6, daily_budget=6
+        )
+        self.assertEqual(ids, [])
+        self.assertEqual(report.deferred, 3)
+
+    def test_announcements_consume_the_nag_budget(self):
+        """
+        Deliberate: on a day full of real news, stacking the usual nagging
+        on top is exactly the volume problem the budget exists to stop.
+        """
+        ids, _ = self._allocate(
+            [self._cand("cap1", 3, kind="capture"), self._cand("nag1", 5)],
+            sent_today=5, daily_budget=6,
+        )
+        self.assertEqual(ids, ["cap1"])
+
+    def test_announcements_are_still_bounded_per_pass(self):
+        """
+        Exempt from the DAILY budget, not from throttling — otherwise a
+        bulk import would fire every notification at once.
+        """
+        caps = [self._cand(f"c{i}", 3, kind="capture") for i in range(10)]
+        ids, report = self._allocate(caps, max_per_pass=3)
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(report.deferred, 7)
+
+    def test_a_deferred_announcement_is_reported_as_budget_blocked_only_when_it_is(self):
+        # Held by the per-pass cap, not the budget: it really does go out
+        # on the next pass, and saying "held until tomorrow" would lie.
+        _, report = self._allocate(
+            [self._cand(f"c{i}", 3, kind="capture") for i in range(5)],
+            max_per_pass=2, daily_budget=6,
+        )
+        self.assertTrue(report.deferred)
+        self.assertFalse(report.budget_blocked)
+
+    def test_budget_blocked_is_set_when_the_daily_cap_is_the_reason(self):
+        _, report = self._allocate(
+            [self._cand("n1", 4)], sent_today=6, daily_budget=6
+        )
+        self.assertTrue(report.budget_blocked)
 
 
 class DailyCounterSelfResets(unittest.TestCase):

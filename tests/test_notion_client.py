@@ -145,6 +145,94 @@ class MarkDone(unittest.TestCase):
         )
 
 
+class SourceLink(unittest.TestCase):
+    """The clickable link back to the Classroom page or Gmail message."""
+
+    def test_is_read_from_the_url_property(self):
+        fields = notion_client.extract_fields(
+            page(properties={"Source Link": {"url": "https://classroom.google.com/c/A/a/B/details"}})
+        )
+        self.assertEqual(
+            fields["source_link"], "https://classroom.google.com/c/A/a/B/details"
+        )
+
+    def test_absent_property_is_none(self):
+        # Manual items never have one, and Peter may delete the property.
+        self.assertIsNone(notion_client.extract_fields(page())["source_link"])
+
+    def test_null_url_is_none(self):
+        fields = notion_client.extract_fields(page(properties={"Source Link": {"url": None}}))
+        self.assertIsNone(fields["source_link"])
+
+    def test_create_item_sends_it_as_a_url_property(self):
+        with mock.patch.object(notion_client, "_request") as request:
+            notion_client.create_item(
+                name="Essay", category=None, due_date=None, source="Classroom",
+                source_link="https://classroom.google.com/c/A/a/B/details",
+            )
+        props = request.call_args.kwargs["json"]["properties"]
+        self.assertEqual(
+            props["Source Link"],
+            {"url": "https://classroom.google.com/c/A/a/B/details"},
+        )
+
+    def test_omitted_entirely_when_absent(self):
+        # Notion rejects some property shapes outright; sending
+        # {"url": None} for every manual item is a needless risk.
+        with mock.patch.object(notion_client, "_request") as request:
+            notion_client.create_item(
+                name="Essay", category=None, due_date=None, source="Manual"
+            )
+        self.assertNotIn("Source Link", request.call_args.kwargs["json"]["properties"])
+
+
+class EnsureManagedProperties(unittest.TestCase):
+    """
+    Self-healing for the properties WE write. Peter hand-edits the schema,
+    and each of these fails silently rather than loudly when missing.
+    """
+
+    def _db(self, present: list[str]) -> dict:
+        return {"properties": {name: {} for name in present}}
+
+    def test_no_op_when_all_present(self):
+        all_names = list(notion_client._MANAGED_PROPERTIES)
+        with mock.patch.object(notion_client, "_request") as request:
+            request.return_value = self._db(all_names)
+            created = notion_client.ensure_managed_properties()
+        self.assertEqual(created, [])
+        # One GET, and crucially no PATCH.
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(request.call_args_list[0].args[0], "GET")
+
+    def test_creates_only_what_is_missing_in_one_patch(self):
+        present = [n for n in notion_client._MANAGED_PROPERTIES
+                   if n != notion_client.SOURCE_LINK_PROP]
+        with mock.patch.object(notion_client, "_request") as request:
+            request.side_effect = [self._db(present), {}]
+            created = notion_client.ensure_managed_properties()
+        self.assertEqual(created, [notion_client.SOURCE_LINK_PROP])
+        patch = request.call_args_list[1]
+        self.assertEqual(patch.args[0], "PATCH")
+        self.assertEqual(
+            patch.kwargs["json"]["properties"],
+            {notion_client.SOURCE_LINK_PROP: {"url": {}}},
+        )
+
+    def test_source_link_is_declared_as_a_url_property(self):
+        # rich_text would store the string but never render it clickable.
+        self.assertEqual(
+            notion_client._MANAGED_PROPERTIES[notion_client.SOURCE_LINK_PROP],
+            {"url": {}},
+        )
+
+    def test_does_not_manage_properties_peter_owns(self):
+        # Recreating one of his would paper over a rename he made on purpose.
+        for owned in ("Title", "Type", "For", "Priority", "Status", "Due Date",
+                      "Input Type", "Task Type", "Resources"):
+            self.assertNotIn(owned, notion_client._MANAGED_PROPERTIES)
+
+
 class ExternalIdIndex(unittest.TestCase):
     def test_collects_ids_and_ignores_pages_without_one(self):
         blank = page()

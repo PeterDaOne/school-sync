@@ -4,19 +4,24 @@ Copy the block below into a fresh Claude Code session to bring it up to
 speed on this project.
 
 **Trim the agenda before pasting.** A multi-item agenda invites a session
-that half-finishes each one. The current agenda is a deliberate exception:
-it is a debugging item that must come first, followed by an open-ended
-audit that depends on what the debugging turns up.
+that half-finishes each one.
 
 Keep this file current. It is the fast path back into the project after a
 context reset, and **a stale handoff is worse than none: it will be
-trusted.** This has already bitten once — an earlier draft of this file
-still described a missing `.gitignore`, absent dedup, no tests, and no git
-repo, months after all four were done. Verify before you write.
+trusted.** This has already bitten once — an earlier draft still
+described a missing `.gitignore`, absent dedup, no tests and no git repo,
+long after all four were done. Verify before you write.
 
-Last updated: 2026-07-31, on commit `5602b5e`. Working tree clean, `main`
-in sync with origin. Always confirm with `git log --oneline origin/main..HEAD`
-and `git status` rather than trusting this line.
+**Do not put real values in this file.** It is tracked in a public repo.
+An earlier version quoted `SCHOOL_EMAIL_HINTS` in full, which named
+Peter's actual school — PII about a minor, published. `scan_secrets.py`
+now catches that; run it before pushing.
+
+Last updated: 2026-07-31, on commit `c69d945` + the session below.
+Working tree state and test count change often — confirm with
+`git log --oneline origin/main..HEAD`, `git status`, and
+`python3 -m unittest discover -s tests -t .` rather than trusting this
+line.
 
 ---
 
@@ -30,121 +35,81 @@ what's already documented; do verify anything you're about to depend on.
 
 ## Where things actually stand
 
-Public repo: https://github.com/PeterDaOne/school-sync, pushed through
-`5602b5e`. **307 stdlib-unittest tests**, green, gating CI. launchd
-loaded and healthy. Nothing uncommitted.
+Public repo: https://github.com/PeterDaOne/school-sync. **345 tests**,
+green, gating CI. launchd loaded. Both capture layers proven end to end
+against real data; Classroom additionally proven running in the cloud.
 
-**Both capture layers are proven end to end against real data.** This was
-the project's longest-standing "written but never run" gap and it is
-closed:
+**Capture, notification and the Gmail pre-filter were all repaired on
+2026-07-31.** Three separate bugs, one reported symptom ("capture is
+missing things"):
 
-- **Classroom** — a real assignment became a real Notion row with the
-  correct `For`, due date, Task Type, Priority and External ID, fired a
-  capture notification confirmed by polling the live ntfy topic, and did
-  not duplicate on the next pass.
-- **Gmail** — a real email did the same, and both dedup layers were
-  verified *independently*: the `school-sync/seen` label excludes a
-  message from the query, and with the label bypassed the External ID
-  skips it before spending a Claude call.
+1. **Capture notifications were starved by the daily budget.** A
+   Gmail-captured assignment sat in Notion, due the next day, unannounced
+   for 3h20m / 137 passes, while the budget was spent re-nagging stale
+   junk. `pipeline._allocate` now rations announcements and nags
+   separately — announcements are exempt from the daily budget (an item
+   can only be captured once, so they are self-limiting) and are still
+   bounded by `MAX_NOTIFICATIONS_PER_PASS`.
+2. **The Gmail subject-keyword whitelist was never widened** when the
+   capture scope was. Measured live: it passed 2 of 6 real messages and
+   silently dropped a chore, a birthday and a tournament. Replaced with a
+   negative filter on Gmail's own promotions/social/forums categories.
+3. **The `school-sync/seen` label outlived the policy that set it.** A
+   chore rejected under the old schoolwork-only rules could never be
+   reconsidered under the new ones. The label is now versioned
+   (`school-sync/seen-v2`); **bump the suffix whenever the capture policy
+   changes.**
 
-**Cloud Classroom capture is proven too, not merely inferred.** A newly
-posted assignment appeared in Notion at 18:25:00Z with launchd unloaded,
-and every field matched a prediction written down beforehand. The
-structural proof is stronger than the unload: `local_sync.py` imports
-only `config, log, pipeline` and references the sweeps zero times, so
-**only `cloud_sync.py` can capture anything.** That also confirms the
-deployed `GOOGLE_REFRESH_TOKEN` carries the new Classroom scope — a
-missing scope 403s and turns the run red.
+All five missed items were recovered and verified in Notion.
 
-**Reuse this technique:** archive a captured row so its External ID
-vanishes, wait ~5 min, see whether it comes back. It is the cheapest
-end-to-end cloud check available without admin log access.
-
-**`ANTHROPIC_API_KEY` as a GitHub secret cannot be verified from outside,
-and that is permanent, not a to-do.** With `SCHOOL_EMAIL_HINTS` filtering
-to school domains and Peter's personal mailbox receiving none, the sweep
-finds 0 candidates and makes no Claude call — so present and missing keys
-produce byte-identical green runs. Only a run log distinguishes them, and
-that needs admin auth. Don't burn time inferring it from outside.
-
-## Agenda item 1 — capture is missing things (do this first)
-
-A Classroom assignment did not become a Notion item, and an email task
-plus two email events were never captured either. **Diagnose before
-changing anything.**
-
-Highest-suspicion lead, check first: the `SCHOOL_EMAIL_HINTS` GitHub
-secret may still hold the old two-domain value (`eldoradohs.org,aps.edu`).
-`.env` was widened to `eldoradohs.org,aps.edu,gmail.com,yahoo.com` but
-the secret update was left to Peter and never confirmed. **The sweeps run
-ONLY in `cloud_sync.py`**, so `.env` governs nothing in production — a
-stale secret filters personal-domain mail out before Claude ever sees it,
-which would explain all three missing email items at once.
-
-Other leads, roughly in order:
-- Is the item absent from Notion, or present but never notified? Those
-  are completely different bugs.
-- `gmail_scan` uses `newer_than:1d`. Mail older than the window is never
-  examined again — the seen-label doesn't help, the message simply falls
-  out of scope. If the cloud missed a day, those are gone permanently.
-  `CLASSROOM_LOOKBACK_HOURS` (48) is the same class of issue.
-- For the Classroom miss: PUBLISHED or still a draft? Already turned in
-  (`_submitted_coursework_ids` skips TURNED_IN/RETURNED)? Outside the
-  lookback? Past `MAX_NEW_PER_RUN`?
-- `MAX_CLASSIFICATIONS_PER_RUN` (10) vs `MAX_MESSAGES_PER_RUN` (20) —
-  check the interaction when a batch exceeds the cap.
-- Actions logs need admin auth; ask Peter to read them rather than
-  trying from outside.
-
-## Agenda item 2 — full system audit (after item 1)
-
-Audit everything: every `.py` file, `generate_plist.py`, the README,
-`.env.example`, the GitHub Actions workflow, the test suite, and CLAUDE.md
-and HANDOFF.md themselves. Fix, streamline, or improve anything actually
-wrong, fragile, redundant, or needlessly complicated.
-
-**Real creative freedom here — this is not a narrow bug-fix pass.** If a
-cleaner architecture, a better abstraction, a smarter dedup strategy, or
-a more robust error-handling pattern occurs to you, pursue it. Read every
-file completely and trace the actual call paths; don't skim. Target:
-"obviously correct and well-built," not "technically works."
-
-Known-real starting points (not exhaustive — keep digging):
-
-- **Gmail `due_date` carries no time**, so an Event captured from email
-  can never reach the hour-before reminder tier (which needs
-  `timeutil.has_time_component`). "Rehearsal Thursday 6pm" reminds
-  morning-of but not an hour before. Documented, unfixed.
-- **`classmap.NON_CLASS_CATEGORIES`** blocks automated capture from ever
-  selecting School/Personal/Friends/Work, so a captured chore lands with
-  `For` blank. That rule was written when the only mechanism was fuzzy
-  string matching on a course name; Claude now classifies explicitly,
-  which is a different mechanism with different risk. **Genuine judgment
-  call — raise it with Peter, don't decide unilaterally.**
-- **An unexplained observation from 2026-07-30**, recorded and never
-  resolved: one run reported "nothing to do" when a reminder was
-  demonstrably due. Did not reproduce in 3 attempts; a Notion query-lag
-  hypothesis was tested and disproven. If a reminder silently fails to
-  fire, this is a prior sighting, not a fresh one.
-- **Two silent time bombs:** the `schedule` cron auto-disables ~Sept 28
-  (60 days from last repo activity) and the cron-job.org PAT expires
-  ~Oct 27. After that both cloud paths die within a month of each other,
-  mid-semester, with nothing appearing broken. The cron-job.org failure
-  alarm is on, which covers the dispatcher but not the PAT expiry itself.
-
-Use a task list. Report what you found, what you fixed, and what you
-deliberately left alone and why.
+**The classifier is now proven on real mail** — 6 for 6 on genuine
+messages, including relative dates ("tomorrow", "end of day today") and
+class resolution ("Physics" → "AP Physics"). That closes what this file
+previously listed as the biggest unproven thing.
 
 ## What is NOT proven
 
-**The classifier's behaviour on real school mail.** The sample is 11
-hand-constructed cases (7 triage + 4 relative-date), all of which passed
-— but they are cases *the assistant wrote*, which is not the same as real
-teacher mail. Untested: forwarded threads, digests carrying several
-assignments, and mail that mentions a deadline without setting one.
+- **Gmail capture has never run in the cloud.** Every real call so far
+  has been local. `ANTHROPIC_API_KEY` as a GitHub secret cannot be
+  verified from outside and that is permanent, not a to-do: with
+  `SCHOOL_EMAIL_HINTS` filtering to school domains and Peter's personal
+  mailbox receiving none, present and missing keys produce byte-identical
+  green runs. Only a run log distinguishes them, and that needs admin
+  auth. Ask Peter to look; don't burn time inferring it.
+- **The Gmail `Source Link` has not been clicked.** The URL shape is
+  pinned by tests and the `authuser=` form is deliberate (`u/0` means
+  "first signed-in account", which breaks once school + personal are both
+  signed in). Whether it actually opens the message needs a human tap.
+- **Real teacher mail at volume.** Still untested: forwarded threads,
+  digests carrying several assignments, mail mentioning a deadline
+  without setting one.
+- **The classifier is non-deterministic.** The same email came back
+  `Events` once and `Tasks` once across two runs. Both readings were
+  defensible, but don't assume a verdict is stable.
 
-Gmail capture has also **never run in the cloud** — every real call so
-far was local.
+## Open items
+
+- **`classmap.NON_CLASS_CATEGORIES`** still blocks automated capture from
+  selecting School/Personal/Friends/Work, so captured chores and personal
+  events land with `For` blank (4 of the 5 recovered items did). Peter
+  decided on 2026-07-31 to **let Claude choose the category explicitly
+  while keeping fuzzy course-name matching locked out** — the hazard was
+  always fuzzy matching, not explicit classification. **Not yet
+  implemented.** It needs a `category` field in the Gmail classifier
+  schema (enum: the four non-class options + null) and a resolver path
+  that accepts an exact category name from the model but still refuses
+  one inferred from a course name.
+- **An unexplained observation from 2026-07-30**, never resolved: one run
+  reported "nothing to do" when a reminder was demonstrably due. Did not
+  reproduce in 3 attempts; a Notion query-lag hypothesis was tested and
+  disproven. If a reminder silently fails to fire, this is a prior
+  sighting, not a fresh one.
+- **Two silent expiries.** README §9 has the full table. The
+  cron-job.org PAT (~2026-10-27) and the GitHub `schedule:` cron
+  (60 days of repo inactivity). Notion Tasks now exist for both, so the
+  reminder system reminds you to maintain the reminder system. A real
+  dead man's switch (healthchecks.io pinged at the end of `cloud_sync`)
+  is the obvious upgrade if this ever bites.
 
 ## Ground rules that were earned the hard way
 
@@ -160,25 +125,25 @@ far was local.
   proto3 JSON API the difference only shows up on the all-zero value —
   the case least likely to appear in casual testing, and the one that
   shipped a day-shifting due-date bug.
+- **Read the logs before theorising.** The 3h20m notification outage was
+  sitting in `sync.log`, once a minute, for 137 consecutive lines. It was
+  invisible because it was *worded* like healthy throttling. When you add
+  a log line, make the bad case read differently from the normal case.
+- **A filter written for one policy silently becomes the policy.** Both
+  the keyword whitelist and the seen-label kept enforcing rules that had
+  been deliberately replaced. When you widen what the system accepts,
+  grep for every narrowing filter upstream of the thing you widened.
 - **Run it against real data before calling it done.** Multiple bugs here
   were invisible to both code review and unit tests and surfaced within
-  minutes of a real API call — the empty `dueTime`, the missing clock in
-  the classifier, the `🏫` emoji nobody knew was being prepended.
+  minutes of a real API call.
 - **Re-check deferred fixes when the reason for deferring them changes.**
-  The Gmail label-ordering bug sat documented-but-unfixed on the grounds
-  that Gmail couldn't run at all; that justification expired the moment
-  an API key went in, and it should have been revisited then.
-- **Writing tests surfaces real bugs.** Treat test-writing as bug
-  hunting, not a separate chore.
 - **local_sync.py runs every 60s via launchd against real Notion data and
   pushes real notifications to Peter's phone.** Unload the job while
   editing (`launchctl unload ~/Library/LaunchAgents/com.peter.schoolsync.plist`)
   and reload only once verified.
 - If you touch real Notion data to test, restore it — EXCEPT "Do dishes",
   "Pray", and "Assinment type shi", which are known junk items.
-- Never commit or expose `.env`, `client_secret.json`, or the generated
-  plist. Run the README's content-level credential scan before any push —
-  the repo is public.
+- **Run `python3 scan_secrets.py` before any push.** The repo is public.
 - Ask Peter on genuine judgment calls with real tradeoffs; make small
   implementation decisions yourself.
 - Update CLAUDE.md's School Sync section AND this file with whatever
@@ -187,38 +152,44 @@ far was local.
 
 ---
 
-## What shipped 2026-07-30 → 07-31
+## What shipped 2026-07-31 (second session)
 
-1. **OAuth re-consent, and a scope-naming discovery.** Google renames
-   BOTH Classroom coursework scopes on grant. Scope strings are therefore
-   useless — actively misleading — as a diagnostic; oauthlib prints a
-   "not all requested scopes were granted" warning to stderr on every
-   refresh even when everything works. Only a 200 from a real API call
-   means anything.
-2. **A day-shifting bug in `_due_date_iso`**, found by tracing and
-   confirmed against live Google data. Proto3 JSON omits zero-valued
-   fields, so midnight UTC arrives as `dueTime: {}`, and `if not t:`
-   treated that as all-day — an assignment due 6:00 PM was recorded as
-   all-day on the FOLLOWING date: **1 day 5:59 late.**
-3. **Per-item error policy** applied to both sweeps, which neither
-   followed: one bad item aborted the rest, permanently in Classroom's
-   case since a failed create writes no External ID.
-4. **`shared/tasktype.py`** — captured items now get Task Type and
-   Priority. One verb + one noun, read off Peter's real rows. Priority is
-   High-or-Medium only, never Low: it multiplies the reminder interval,
-   and an automated guess must not make an item nag *less* than default.
-5. **Gmail capture widened beyond schoolwork**, and Claude now classifies
-   into `Type` — which selects the reminder cadence, so it is not
-   cosmetic. Verified live on 7 triage cases including three
-   deliberately keyword-loaded corporate CTAs, all correctly rejected.
-6. **The classifier had no clock** — relative dates resolved to null, and
-   an Event with no due date gets no reminders at all, so capture looked
-   successful and silently never fired. Today's date now goes in the
-   prompt.
-7. **The `[unconfirmed]` title prefix was removed** — `Input Type =
-   Email` already records provenance structurally, and the prefix
-   duplicated it into the one field that rides into every notification.
-8. **Tests 229 → 307.**
+1. **Diagnosed "capture is missing things" into three distinct bugs**
+   (above). The reported symptom was one thing; the causes were in the
+   allocator, the Gmail query, and the label — three different layers.
+   The Gmail task Peter thought was never captured *was* in Notion the
+   whole time; he had simply never been told.
+2. **`pipeline._allocate` now treats announcements and nags as different
+   kinds of message.** `Reminder.kind` carries the distinction so it
+   isn't re-derived by string-matching a title.
+3. **Capture urgency now tracks the due date** instead of sitting at a
+   flat priority 3.
+4. **The summary line distinguishes "back in a minute" from "back
+   tomorrow."** Both used to print "deferred to next pass".
+5. **`Source Link`** (Notion `url`) on captured items, linking back to
+   the Classroom assignment page or the Gmail message. Classroom uses the
+   API's own `alternateLink`; Gmail is built with `?authuser=<address>`.
+   Three pre-existing rows were backfilled.
+6. **Three `ensure_*_property` functions became one**
+   `ensure_managed_properties()` — one GET and one PATCH instead of one
+   read per property.
+7. **`reminders.TUNABLE_ENV_VARS`** is now the single source for the
+   reminder knobs, imported by `generate_plist.py`. Five knobs added
+   2026-07-30 had reached the workflow but never the plist, so tuning one
+   in `.env` would have changed the cloud's behaviour and not the Mac's,
+   silently. `tests/test_settings_parity.py` pins all three lists.
+8. **`scan_secrets.py`** — the content-level credential scan is now a
+   runnable, exit-coded check rather than prose in CLAUDE.md. It
+   immediately found Peter's real school domain hardcoded in a test file
+   and in this handoff.
+9. **Classroom lookback 48h → 168h**, matching the Gmail window, for the
+   same reason: an outage longer than the window loses work permanently
+   and silently.
+10. **Dead code and dead config removed** — `state.utc_now_iso` (unused
+    re-export) and three `REMINDER_INTERVAL_HOURS*` settings left in
+    `.env` from the pre-2026-07-29 tier system, which nothing had read
+    for two days and which looked live.
+11. **Tests 307 → 345.**
 
 ## Maintaining this file
 

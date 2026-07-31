@@ -315,6 +315,52 @@ class RelativeDue(unittest.TestCase):
 
 
 class CaptureNotification(unittest.TestCase):
+    def test_is_tagged_as_a_capture_not_a_recurring_reminder(self):
+        """
+        pipeline._allocate rations the two completely differently -- a
+        capture is the only time an item is ever announced, a recurring
+        reminder repeats by design. The kind must not be inferable only
+        by string-matching the title back apart.
+        """
+        r = reminders.due_for_reminder(
+            item(last_reminded=None), at("2026-07-28T09:00"), cadence=CADENCE
+        )
+        self.assertEqual(r.kind, "capture")
+
+    def test_a_recurring_reminder_is_not_tagged_as_capture(self):
+        r = reminders.due_for_reminder(
+            item(last_reminded="2026-07-01T09:00:00.000-06:00"),
+            at("2026-07-28T09:00"), cadence=CADENCE,
+        )
+        self.assertEqual(r.kind, "recurring")
+
+    def test_urgency_reflects_the_due_date_rather_than_a_flat_default(self):
+        """
+        Capture used to sit at the default priority 3 however close the
+        due date was, so "you have never heard of this and it is due
+        tomorrow" arrived at the same lock-screen weight as one due in
+        three weeks.
+        """
+        overdue = reminders.due_for_reminder(
+            item(last_reminded=None, due_date="2026-07-20"),
+            at("2026-07-28T09:00"), cadence=CADENCE,
+        )
+        soon = reminders.due_for_reminder(
+            item(last_reminded=None, due_date="2026-07-28T23:00:00.000-06:00"),
+            at("2026-07-28T09:00"), cadence=CADENCE,
+        )
+        far = reminders.due_for_reminder(
+            item(last_reminded=None, due_date="2026-08-26"),
+            at("2026-07-28T09:00"), cadence=CADENCE,
+        )
+        self.assertEqual((overdue.priority, soon.priority, far.priority), (5, 4, 3))
+
+    def test_an_undated_capture_stays_at_the_neutral_priority(self):
+        r = reminders.due_for_reminder(
+            item(last_reminded=None, due_date=None), at("2026-07-28T09:00"), cadence=CADENCE
+        )
+        self.assertEqual(r.priority, 3)
+
     def test_fires_once_when_never_reminded(self):
         r = reminders.due_for_reminder(
             item(last_reminded=None), at("2026-07-28T09:00"), cadence=CADENCE

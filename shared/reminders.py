@@ -175,6 +175,44 @@ DEFAULT_MIN_INTERVAL_HOURS = 2.0
 DEFAULT_LOAD_SCALE_TARGET = 5
 
 
+# EVERY environment variable Cadence.from_env() reads, in one list.
+#
+# It exists because these names live in three places that must agree —
+# this module, generate_plist.py's OPTIONAL_KEYS (the Mac), and the
+# `env:` block of .github/workflows/sync.yml (the cloud) — and they
+# drifted. Five knobs added on 2026-07-30 (OVERDUE_DECAY_BASE,
+# OVERDUE_MAX_INTERVAL_HOURS, DAILY_NOTIFICATION_BUDGET,
+# MIN_INTERVAL_HOURS, LOAD_SCALE_TARGET_ITEMS) reached the workflow but
+# never reached the plist.
+#
+# That divergence is silent and nasty: setting one in .env would tune the
+# cloud while the Mac quietly kept its default, so the two schedulers
+# would disagree about how hard to nag the same item — the exact failure
+# the workflow's own comments warn about. generate_plist imports this
+# list, and a test asserts the workflow carries every name in it.
+TUNABLE_ENV_VARS = (
+    "QUIET_HOURS_START",
+    "QUIET_HOURS_END",
+    "ASSIGNMENT_ALPHA_HOURS_PER_DAY",
+    "ASSIGNMENT_FLOOR_HOURS",
+    "ASSIGNMENT_CEILING_HOURS",
+    "TASK_ALPHA_HOURS_PER_DAY",
+    "TASK_FLOOR_HOURS",
+    "TASK_CEILING_HOURS",
+    "PRIORITY_MULTIPLIER_HIGH",
+    "PRIORITY_MULTIPLIER_MEDIUM",
+    "PRIORITY_MULTIPLIER_LOW",
+    "REMINDER_JITTER_FRACTION",
+    "MAX_NOTIFICATIONS_PER_PASS",
+    "EVENT_REMINDER_HOUR",
+    "OVERDUE_DECAY_BASE",
+    "OVERDUE_MAX_INTERVAL_HOURS",
+    "DAILY_NOTIFICATION_BUDGET",
+    "MIN_INTERVAL_HOURS",
+    "LOAD_SCALE_TARGET_ITEMS",
+)
+
+
 def _parse_hhmm(s: str, fallback: str) -> dtime:
     try:
         hh, mm = s.strip().split(":")
@@ -533,6 +571,21 @@ class Reminder:
     # chose over queueing it until morning.
     silent: bool = False
     priority: int = 3  # ntfy priority, 1-5
+    # "capture" or "recurring". NOT cosmetic, and not derivable from the
+    # title without string-matching it back apart: pipeline._allocate
+    # rations these two completely differently, because they are not the
+    # same kind of message.
+    #
+    # A "capture" reminder is the ONLY time Peter is ever told that an item
+    # exists. Miss it and the information is never re-sent in that form --
+    # the item silently joins the recurring pool as though he already knew
+    # about it. A "recurring" reminder is by construction repeatable: drop
+    # one and the next lands an interval later having lost nothing.
+    #
+    # Treating them as interchangeable is what let the daily budget starve
+    # every capture notification for 3+ hours on 2026-07-31 while Peter
+    # concluded, reasonably, that capture itself was broken.
+    kind: str = "recurring"
     # ntfy converts any tag matching an emoji short code into an emoji and
     # PREPENDS it to the title. The old default of "school" therefore put
     # a 🏫 on the front of every single notification — verified against
@@ -668,9 +721,21 @@ def _evaluate(item: dict, now: datetime, cadence: Cadence, lag: timedelta) -> Re
             if lag and created and created > effective:
                 return None  # typed by hand just now — let local_sync go first
         due_phrase = f"due {_friendly_due(due, has_time)}" if due else ""
+        # Urgency of a capture matches the recurring rule, rather than
+        # sitting at the default 3 forever. An assignment Peter has never
+        # heard of that is due tomorrow is not a low-priority message, and
+        # announcing it at the same lock-screen weight as one due in three
+        # weeks threw away the only signal the notification had.
+        capture_days_until = (due - effective).total_seconds() / 86400 if due else None
+        priority = 3
+        if capture_days_until is not None:
+            priority = 5 if capture_days_until < 0 else (4 if capture_days_until < 1 else 3)
         return Reminder(
             title=_title(type_name, "capture", category),
             body=_body(category, name, due_phrase),
+            priority=priority,
+            tags="rotating_light" if priority >= 4 else "",
+            kind="capture",
         )
 
     if type_name == "Events":
