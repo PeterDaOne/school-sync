@@ -13,10 +13,11 @@ one-item-at-a-time after it.
 Keep this file current. It is the fast path back into the project after a
 context reset, and a stale handoff is worse than none: it will be trusted.
 
-Last updated: 2026-07-30 (second session that day), on commit 9bba1e1.
-Seven commits from this session are COMMITTED BUT NOT PUSHED — check
-`git status` and `git log origin/main..HEAD` before assuming the cloud
-is running current code.
+Last updated: 2026-07-30 (second session that day), on commit a6f76c8.
+Most of that session IS pushed (origin/main was at efc74a9); the
+Classroom fixes and this handoff are not. Always confirm with
+`git log --oneline origin/main..HEAD` rather than trusting this line —
+it goes stale the moment anyone commits.
 
 ---
 
@@ -33,9 +34,11 @@ the last session and is accurate. Don't rediscover what's already there.
 Repo: https://github.com/PeterDaOne/school-sync (public). **229**
 stdlib-unittest tests, green locally. launchd loaded and healthy.
 
-**UNPUSHED.** Seven commits sit on local `main`. Until they're pushed,
-GitHub Actions runs the OLD cadence and cannot read the renamed `For`
-property. This is the first thing to check.
+**Mostly pushed.** The cadence rework, the `For` rename and the ntfy
+tag fix ARE live in the cloud. Unpushed as of writing: the Classroom
+teacher-course fix and this handoff — both inert in the cloud anyway,
+since the deployed refresh token lacks the new Classroom scope. Confirm
+the real state with `git log --oneline origin/main..HEAD`.
 
 **Verified working against real data:** the whole cloud path (secrets,
 dispatch-based sub-6-min latency, Calendar sync); the reminder engine
