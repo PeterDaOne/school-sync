@@ -123,16 +123,36 @@ before any push — the repo is public.
 5. **Tests 229 → 297.** `test_classroom_scan.py` 6 → 29;
    `test_gmail_scan.py` new at 20; `test_tasktype.py` new at 25.
 
-## Known unfixed bug — do this before the first real Gmail run
+## The Gmail label-ordering bug is FIXED (2026-07-31)
 
-`gmail_scan.py` calls `_mark_seen` BEFORE `create_item`. If the create
-throws (a malformed `due_date` from Claude → Notion 400), the email is
-already labelled `school-sync/seen`, the next run's `-label:` clause
-excludes it forever, and **the assignment is silently lost**. Fix: label
-rejects immediately (that is the cost control and must stay), but label
-accepts only after the item exists. Left unfixed deliberately — Gmail
-cannot run at all yet, and changing unverifiable code was judged worse
-than documenting it.
+`gmail_scan.py` used to call `_mark_seen` BEFORE `create_item`, so a
+create that threw left the email labelled `school-sync/seen` while no
+Notion item existed — the next run's `-label:` clause excluded it
+forever and the assignment was silently lost. Now a rejection is
+labelled immediately (nothing was created, and not paying to recompute a
+"no" is the whole reason the label exists) and an acceptance is labelled
+only after the item exists.
+
+The sweep also now follows the project's per-item error policy, which it
+did not: one bad message aborted the rest.
+
+**Verified against a real Gmail message**, not just unit tests: the
+create was forced to fail, the message was confirmed NOT labelled, and
+it was then recovered on the retry.
+
+## What is NOT proven about Gmail capture
+
+The plumbing is done. What is unknown is **the classifier's behaviour on
+real school mail** — the sample so far is one hand-written test email
+and one control. Untested: forwarded threads, digest emails carrying
+several assignments, relative dates ("next Friday", "before break"),
+and teacher mail that mentions a deadline without setting one. Whether
+Claude's `due_date` strings are always well-formed enough for Notion to
+accept is also unverified — that is exactly the failure the fix above
+now makes recoverable rather than silent.
+
+Gmail capture has also **never run in the cloud** — every real call so
+far was local.
 
 ## Suggested next item (pick ONE)
 
