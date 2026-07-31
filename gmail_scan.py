@@ -39,7 +39,7 @@ import sys
 
 from googleapiclient.errors import HttpError
 
-from shared import classmap, config, googleauth, notion_client
+from shared import classmap, config, googleauth, notion_client, tasktype
 
 # gmail.modify is required to apply the "seen" label. It is a broader
 # scope than readonly, so it is requested deliberately and used for
@@ -76,16 +76,20 @@ ASSIGNMENT_SCHEMA = {
             "type": "boolean",
             "description": "True only if this describes a specific school assignment, test, or task.",
         },
+        # anyOf rather than a ["string", "null"] type-union array: the
+        # structured-outputs spec documents anyOf as supported and does not
+        # list type unions, and this code has never made a real call. Same
+        # meaning, documented shape.
         "task_name": {
-            "type": ["string", "null"],
+            "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "Short name for the assignment, or null if is_assignment is false.",
         },
         "class_name": {
-            "type": ["string", "null"],
+            "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "Class or course name if identifiable, otherwise null.",
         },
         "due_date": {
-            "type": ["string", "null"],
+            "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "Due date as YYYY-MM-DD, or null if no date is stated or implied.",
         },
     },
@@ -229,6 +233,8 @@ def run(known_ids: set[str] | None = None):
     messages = results.get("messages", [])
 
     category_options = notion_client.select_option_names(notion_client.CATEGORY_PROP)
+    task_type_options = notion_client.select_option_names(notion_client.TASK_TYPE_PROP)
+    priority_options = notion_client.select_option_names(notion_client.PRIORITY_PROP)
     added = skipped = classified = 0
 
     for msg_ref in messages:
@@ -270,6 +276,13 @@ def run(known_ids: set[str] | None = None):
             due_date=parsed.get("due_date"),
             source="Email",
             external_id=external_id,
+            # Inferred from Claude's task_name, NOT the "[unconfirmed] "
+            # prefix the item is stored under -- that prefix is display
+            # only and would never match a keyword.
+            task_type=tasktype.resolve(
+                parsed["task_name"], "Assignments", task_type_options
+            ),
+            priority=tasktype.priority(parsed["task_name"], priority_options),
         )
         known_ids.add(external_id)  # guard against duplicates within this run
         added += 1
