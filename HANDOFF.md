@@ -39,27 +39,39 @@ date and External ID, fired a capture notification that was confirmed
 landing on Peter's phone by polling the live ntfy topic, and did not
 duplicate on the next pass. Full `cloud_sync.py` then ran clean, exit 0.
 
-**Still never run end to end: Gmail capture.** `gmail_scan.py` has never
-created a Notion item. Peter was walked through getting an
-`ANTHROPIC_API_KEY` at the end of this session — **check whether
-`.env` still says `sk-ant-xxxx` before assuming either way.** It has 20
-tests now, but they stub the classifier; see the "what that does and
-doesn't prove" note in CLAUDE.md before claiming anything about it.
+**Gmail capture ALSO works now.** `ANTHROPIC_API_KEY` is real in `.env`,
+and a real email became a real `[unconfirmed]` Notion row with the right
+`For`, Task Type, Priority and due date, plus a phone notification. Both
+dedup layers were verified separately (seen-label excludes from the
+query; External ID skips before spending a Claude call). The `anyOf`
+schema change is confirmed working on a live call.
 
-**One thing to verify on Gmail's first real call:** three schema fields
-were changed from `["string", "null"]` type-unions to `anyOf` because
-the structured-outputs spec documents `anyOf` and does not list type
-unions. That change was made from the spec, not from an observed
-failure — confirm the call actually succeeds.
+Note his personal mailbox has no school mail, so the sweep finds 0
+candidates on its own — the end-to-end test overrode
+`SCHOOL_EMAIL_HINTS=gmail.com` as an env var (not a `.env` edit).
 
-**One thing is NOT verified and is the most likely thing to be broken:**
-whether the `GOOGLE_REFRESH_TOKEN` GitHub secret was updated. Everything
-above was tested by running the code locally. `classroom_scan` only
-runs inside `cloud_sync.py` on GitHub Actions, so **a token that works
-locally proves nothing about production.** The old token lacks the new
-Classroom scope. If the secret was not updated, cloud Classroom capture
-is silently dead while everything else stays green. Check the Actions
-log for `[classroom_scan]` before assuming it works.
+**Nothing in the capture layer is unproven any more.** Both sweeps have
+created real Notion items, fired real notifications, and been shown not
+to duplicate.
+
+**What is NOT verified, and is the most likely thing to be broken: the
+GitHub secrets.** Everything above was tested by running the code
+locally, and **both capture sweeps run ONLY inside `cloud_sync.py` on
+GitHub Actions** — so local success proves nothing about production.
+Three secrets matter:
+
+1. `GOOGLE_REFRESH_TOKEN` — the deployed one may still predate the new
+   Classroom scope. If so, cloud Classroom capture is silently dead
+   while every run stays green.
+2. `ANTHROPIC_API_KEY` — without it `gmail_scan` skips itself cleanly
+   (by design), so cloud Gmail capture simply never happens.
+3. `SCHOOL_EMAIL_HINTS` — **the dangerous one.** Unset it becomes `""`,
+   `_candidate_query` drops the `from:` filter entirely, and the sweep
+   classifies ANY sender whose subject contains "due"/"test"/"project".
+   Adding the API key WITHOUT this is worse than adding neither.
+
+Check an Actions log for `[classroom_scan]` / `[gmail_scan]` lines
+before assuming any of it works.
 
 ## What is and isn't committed
 
