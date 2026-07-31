@@ -245,6 +245,7 @@ def run(known_ids: set[str] | None = None):
     task_type_options = notion_client.select_option_names(notion_client.TASK_TYPE_PROP)
     priority_options = notion_client.select_option_names(notion_client.PRIORITY_PROP)
     added = skipped = classified = 0
+    failures: list[str] = []
 
     for msg_ref in messages:
         external_id = f"gmail:{msg_ref['id']}"
@@ -259,44 +260,79 @@ def run(known_ids: set[str] | None = None):
             )
             break
 
-        msg = (
-            service.users()
-            .messages()
-            .get(userId="me", id=msg_ref["id"], format="metadata", metadataHeaders=["Subject"])
-            .execute()
-        )
-        headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
-        parsed = _extract_assignment(client, headers.get("Subject", ""), msg.get("snippet", ""))
-        classified += 1
+        # Per item, per the project's error policy (see shared/pipeline.py
+        # and classroom_scan.run): one message that fails must not stop
+        # the rest of the sweep. Re-raised at the end so the run still
+        # goes red.
+        try:
+            msg = (
+                service.users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=msg_ref["id"],
+                    format="metadata",
+                    metadataHeaders=["Subject"],
+                )
+                .execute()
+            )
+            headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+            parsed = _extract_assignment(
+                client, headers.get("Subject", ""), msg.get("snippet", "")
+            )
+            classified += 1
 
-        # Mark it seen whatever the verdict — a "no" is exactly the
-        # answer we must not pay to recompute.
-        _mark_seen(service, msg_ref["id"], label_id)
+            if not parsed:
+                # A REJECTION is labelled immediately. Nothing was
+                # created, so there is nothing to lose -- and not paying
+                # to recompute a "no" is the entire reason the label
+                # exists.
+                _mark_seen(service, msg_ref["id"], label_id)
+                continue
 
-        if not parsed:
+            notion_client.create_item(
+                name=parsed["task_name"],
+                # Claude can invent a class name that isn't one of Peter's
+                # Notion options, and Notion would happily create it. Resolve
+                # against the real options or leave it blank.
+                category=classmap.resolve(parsed.get("class_name"), category_options),
+                due_date=parsed.get("due_date"),
+                source="Email",
+                external_id=external_id,
+                task_type=tasktype.resolve(
+                    parsed["task_name"], "Assignments", task_type_options
+                ),
+                priority=tasktype.priority(parsed["task_name"], priority_options),
+            )
+            known_ids.add(external_id)  # guard against duplicates within this run
+            added += 1
+
+            # An ACCEPTANCE is labelled only after the item exists.
+            # Labelling before the create meant a create that threw --
+            # a malformed due_date from Claude gets a 400 from Notion --
+            # left the message labelled `school-sync/seen`, so the next
+            # run's `-label:` clause excluded it forever while no Notion
+            # item existed. The assignment was silently lost. Now a
+            # failed create costs one extra classification next run
+            # instead of the item.
+            _mark_seen(service, msg_ref["id"], label_id)
+        except Exception as e:
+            failures.append(f"{msg_ref['id']}: {e}")
+            print(f"[gmail_scan] could not process {msg_ref['id']}: {e}", file=sys.stderr)
             continue
-
-        notion_client.create_item(
-            name=parsed["task_name"],
-            # Claude can invent a class name that isn't one of Peter's
-            # Notion options, and Notion would happily create it. Resolve
-            # against the real options or leave it blank.
-            category=classmap.resolve(parsed.get("class_name"), category_options),
-            due_date=parsed.get("due_date"),
-            source="Email",
-            external_id=external_id,
-            task_type=tasktype.resolve(
-                parsed["task_name"], "Assignments", task_type_options
-            ),
-            priority=tasktype.priority(parsed["task_name"], priority_options),
-        )
-        known_ids.add(external_id)  # guard against duplicates within this run
-        added += 1
 
     if added or skipped or classified:
         print(
             f"[gmail_scan] classified {classified}, added {added} item(s), "
             f"skipped {skipped} already captured"
+        )
+
+    # Raised only after every other message has had its chance, so
+    # cloud_sync's _run_phase turns this into a red run rather than a
+    # silent partial success.
+    if failures:
+        raise RuntimeError(
+            f"{len(failures)} message(s) could not be processed: " + "; ".join(failures)
         )
 
 

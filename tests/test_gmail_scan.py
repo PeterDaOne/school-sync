@@ -294,6 +294,56 @@ class Run(unittest.TestCase):
         self._run(svc, [ASSIGNMENT, ASSIGNMENT])
         self.assertEqual(len(self.created), 1)
 
+    def test_a_failed_create_does_not_label_the_message(self):
+        """
+        REGRESSION, and the one that mattered most. _mark_seen used to run
+        BEFORE create_item, so a create that threw left the email
+        labelled `school-sync/seen` -- the next run's `-label:` clause
+        excluded it forever while no Notion item existed, and the
+        assignment was silently lost.
+
+        Unlabelled means it gets retried: one extra classification
+        instead of a lost assignment.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+
+        def boom(**kwargs):
+            raise ValueError("Notion rejected the due date")
+
+        with mock.patch.object(gmail_scan.notion_client, "create_item", boom):
+            with self.assertRaises(RuntimeError):
+                self._run(svc, [ASSIGNMENT])
+        self.assertEqual(svc.modified, [], "a failed create must NOT label the message")
+
+    def test_a_rejection_is_still_labelled_immediately(self):
+        """
+        The other half: a "no" creates nothing, so there is nothing to
+        lose by labelling at once -- and not paying to recompute it is
+        the whole reason the label exists.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [None])
+        self.assertEqual(svc.modified, ["m1"])
+
+    def test_one_bad_message_does_not_stop_the_others(self):
+        svc = FakeGmail(
+            labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1", "m2", "m3"]
+        )
+        calls = {"n": 0}
+
+        def sometimes_boom(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise ValueError("Notion said no")
+            self.created.append(kwargs)
+
+        with mock.patch.object(gmail_scan.notion_client, "create_item", sometimes_boom):
+            with self.assertRaises(RuntimeError):  # still fails loudly
+                self._run(svc, [ASSIGNMENT, ASSIGNMENT, ASSIGNMENT])
+        self.assertEqual(calls["n"], 3, "all three should have been attempted")
+        self.assertEqual(len(self.created), 2, "the two good ones still landed")
+        self.assertEqual(svc.modified, ["m1", "m3"], "only the successes were labelled")
+
     def test_without_the_modify_scope_the_sweep_still_runs(self):
         svc = FakeGmail(label_error=http_error(403), messages=["m1"])
         self._run(svc, [ASSIGNMENT])
