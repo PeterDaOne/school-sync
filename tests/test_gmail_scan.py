@@ -12,8 +12,9 @@ against real Notion options rather than sent raw.
 Does NOT prove: that Claude classifies real school email correctly, that
 the prompt is any good, that its due_date strings are well-formed, or
 that the whole sweep works against a live mailbox. Every test here feeds
-_extract_assignment a canned answer. The classifier is the part with no
-API key, and it is exactly the part still unverified.
+_classify_email a canned answer. Whether Claude actually tells a real
+request from a corporate call to action is verified against live mail,
+not here.
 """
 
 import unittest
@@ -93,7 +94,15 @@ class _Messages:
     def get(self, userId=None, id=None, format=None, metadataHeaders=None):
         subject, snippet = self.p._bodies.get(id, ("A Subject", "A snippet"))
         return _Exec(
-            {"payload": {"headers": [{"name": "Subject", "value": subject}]}, "snippet": snippet}
+            {
+                "payload": {
+                    "headers": [
+                        {"name": "Subject", "value": subject},
+                        {"name": "From", "value": "Someone <someone@example.com>"},
+                    ]
+                },
+                "snippet": snippet,
+            }
         )
 
     def modify(self, userId=None, id=None, body=None):
@@ -165,24 +174,46 @@ class SeenLabel(unittest.TestCase):
 
 
 ASSIGNMENT = {
-    "is_assignment": True,
+    "is_actionable": True,
+    "item_type": "Assignments",
     "task_name": "Read chapter 4",
     "class_name": "AP Language & Composition Period 3",
     "due_date": "2026-08-01",
 }
 
+CHORE = {
+    "is_actionable": True,
+    "item_type": "Tasks",
+    "task_name": "Mow the backyard",
+    "class_name": None,
+    "due_date": "2026-08-01",
+}
+
 OPTIONS = ["AP Lang", "AP Stats", "AP Physics", "School", "Personal"]
+TASK_TYPES = ["Execute", "Attend", "Remember", "Action", "Reading", "Essay/Writing"]
+PRIORITIES = ["High", "Medium", "Low"]
+TYPES = ["Assignments", "Tasks", "Events"]
+
+
+def options_for(prop):
+    """select_option_names is called per property; route by name."""
+    return {
+        "For": OPTIONS,
+        "Task Type": TASK_TYPES,
+        "Priority": PRIORITIES,
+        "Type": TYPES,
+    }[prop]
 
 
 class Run(unittest.TestCase):
-    """The sweep, with _extract_assignment stubbed -- see module docstring."""
+    """The sweep, with _classify_email stubbed -- see module docstring."""
 
     def setUp(self):
         self.created = []
         patches = [
             mock.patch.object(gmail_scan.notion_client, "create_item", self._create),
             mock.patch.object(
-                gmail_scan.notion_client, "select_option_names", return_value=OPTIONS
+                gmail_scan.notion_client, "select_option_names", side_effect=options_for
             ),
             mock.patch.object(gmail_scan.config, "optional", self._optional),
         ]
@@ -199,7 +230,7 @@ class Run(unittest.TestCase):
     def _run(self, svc, verdicts, known_ids=None):
         answers = list(verdicts)
         with mock.patch.object(gmail_scan, "_gmail_service", return_value=svc), mock.patch.object(
-            gmail_scan, "_extract_assignment", side_effect=lambda *a, **k: answers.pop(0)
+            gmail_scan, "_classify_email", side_effect=lambda *a, **k: answers.pop(0)
         ):
             gmail_scan.run(known_ids=known_ids)
 
@@ -343,6 +374,65 @@ class Run(unittest.TestCase):
         self.assertEqual(calls["n"], 3, "all three should have been attempted")
         self.assertEqual(len(self.created), 2, "the two good ones still landed")
         self.assertEqual(svc.modified, ["m1", "m3"], "only the successes were labelled")
+
+    def test_a_chore_is_captured_as_a_task_not_an_assignment(self):
+        """
+        Widened 2026-07-31: capture is no longer schoolwork-only. The Type
+        matters because it selects the reminder cadence -- a chore filed
+        as an Assignment would nag far harder than it deserves.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [CHORE])
+        item = self.created[0]
+        self.assertEqual(item["type_name"], "Tasks")
+        self.assertEqual(item["name"], "Mow the backyard")
+        self.assertIsNone(item["category"], "a chore belongs to no class")
+
+    def test_the_type_drives_the_task_type_verb(self):
+        """An Event is something to Attend, not Execute."""
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [{**CHORE, "item_type": "Events", "task_name": "Band concert"}])
+        self.assertIn("Attend", self.created[0]["task_type"])
+
+    def test_an_invalid_type_falls_back_rather_than_polluting_notion(self):
+        """
+        The schema enum makes this near-impossible, but Notion silently
+        CREATES any select option it is handed, so it is checked anyway.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [{**CHORE, "item_type": "Chores"}])
+        self.assertEqual(self.created[0]["type_name"], gmail_scan.DEFAULT_ITEM_TYPE)
+        self.assertIn(self.created[0]["type_name"], TYPES)
+
+    def test_a_missing_type_falls_back_to_tasks(self):
+        """
+        Tasks rather than Assignments on purpose: the Tasks cadence stays
+        quiet until the due date is close, so a mis-typed item under-nags
+        rather than over-nags.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [{**CHORE, "item_type": None}])
+        self.assertEqual(self.created[0]["type_name"], "Tasks")
+
+    def test_a_non_actionable_email_creates_nothing(self):
+        """is_actionable False is how a promotional email is rejected."""
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [None])
+        self.assertEqual(self.created, [])
+
+    def test_the_sender_is_passed_to_the_classifier(self):
+        """
+        The From header carries most of the signal for the corporate-CTA
+        distinction, so it must actually reach the model.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        seen = {}
+        with mock.patch.object(gmail_scan, "_gmail_service", return_value=svc), \
+             mock.patch.object(
+                 gmail_scan, "_classify_email",
+                 side_effect=lambda c, subj, sender, snip: seen.update(sender=sender) or ASSIGNMENT):
+            gmail_scan.run(known_ids=set())
+        self.assertIn("someone@example.com", seen["sender"])
 
     def test_without_the_modify_scope_the_sweep_still_runs(self):
         svc = FakeGmail(label_error=http_error(403), messages=["m1"])

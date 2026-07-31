@@ -3,6 +3,27 @@
 gmail_scan.py — the email capture layer. Cloud-only (runs inside
 cloud_sync.py via GitHub Actions).
 
+WHAT IT CAPTURES (widened 2026-07-31, Peter's call)
+---------------------------------------------------
+Originally school assignments only. Now anything a real person -- or his
+school -- is asking him to personally do: homework, a chore from a
+family member, a form to return, a meeting to attend. Claude also
+classifies it into Notion's `Type` (Assignments / Tasks / Events).
+
+That type is not cosmetic: it selects the reminder cadence in
+shared/reminders.py. Assignments nag early and often (alpha=3.4, 48h
+ceiling); Tasks stay quiet until the due date is close (alpha=24, 72h);
+Events get fixed-point reminders at 3 days, 1 day, morning-of, and an
+hour before. A chore filed as an Assignment would nag far harder than it
+deserves, which is why the classifier is asked for the type rather than
+everything defaulting to Assignments.
+
+The hard part is not the output shape but telling a real request from a
+corporate call to action -- "sale ends Friday" is a deadline, not an
+obligation. That judgement lives in CLASSIFIER_SYSTEM, with examples,
+and the sender address is passed to the model because it carries most of
+the signal (a person's address reads very differently from noreply@).
+
 Email parsing is not infallible: unlike Classroom, where the title, due
 date and course arrive as structured fields, everything here is inferred
 by Claude from prose. So a captured item is worth a glance before it is
@@ -48,7 +69,7 @@ import sys
 
 from googleapiclient.errors import HttpError
 
-from shared import classmap, config, googleauth, notion_client, tasktype
+from shared import classmap, config, googleauth, notion_client, tasktype, timeutil
 
 # gmail.modify is required to apply the "seen" label. It is a broader
 # scope than readonly, so it is requested deliberately and used for
@@ -76,35 +97,96 @@ MAX_CLASSIFICATIONS_PER_RUN = 10
 LOOKBACK_WITH_LABEL = "newer_than:1d"
 LOOKBACK_WITHOUT_LABEL = "newer_than:2h"
 
+# The Notion `Type` options. Kept as a constant because it is also the
+# schema enum below: structured outputs then make an invalid value
+# impossible rather than merely unlikely, which matters because Notion
+# silently CREATES any select option it is handed.
+ITEM_TYPES = ["Assignments", "Tasks", "Events"]
+
+# Fallback when the model somehow returns a type outside ITEM_TYPES, or
+# none at all. "Tasks" rather than "Assignments" on purpose: the Tasks
+# cadence (alpha=24, 72h ceiling) stays quiet until the due date is
+# close, so a mis-typed item under-nags rather than over-nags. See
+# shared/reminders.py.
+DEFAULT_ITEM_TYPE = "Tasks"
+
 # Structured outputs guarantee the response parses — no markdown fences
 # to strip, no malformed JSON to catch.
 ASSIGNMENT_SCHEMA = {
     "type": "object",
     "properties": {
-        "is_assignment": {
+        "is_actionable": {
             "type": "boolean",
-            "description": "True only if this describes a specific school assignment, test, or task.",
+            "description": (
+                "True only if a real person or Peter's school is asking Peter to "
+                "personally do something. False for marketing, promotions, "
+                "newsletters, receipts, and automated notifications."
+            ),
         },
         # anyOf rather than a ["string", "null"] type-union array: the
         # structured-outputs spec documents anyOf as supported and does not
-        # list type unions, and this code has never made a real call. Same
-        # meaning, documented shape.
+        # list type unions. Confirmed working on a live call 2026-07-31.
+        "item_type": {
+            "anyOf": [{"type": "string", "enum": ITEM_TYPES}, {"type": "null"}],
+            "description": (
+                "Assignments = schoolwork to produce or study for. "
+                "Tasks = anything else to do (chores, errands, forms, replies). "
+                "Events = something to show up to at a particular time. "
+                "Null if is_actionable is false."
+            ),
+        },
         "task_name": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
-            "description": "Short name for the assignment, or null if is_assignment is false.",
+            "description": "Short imperative name, or null if is_actionable is false.",
         },
         "class_name": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
-            "description": "Class or course name if identifiable, otherwise null.",
+            "description": "School class or course name if identifiable, otherwise null.",
         },
         "due_date": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
-            "description": "Due date as YYYY-MM-DD, or null if no date is stated or implied.",
+            "description": (
+                "Due date as YYYY-MM-DD, resolved against the current date given "
+                "in the message. Resolve relative dates like 'Thursday', 'next "
+                "Friday' or 'tomorrow'. Null only if no date is stated or implied."
+            ),
         },
     },
-    "required": ["is_assignment", "task_name", "class_name", "due_date"],
+    "required": ["is_actionable", "item_type", "task_name", "class_name", "due_date"],
     "additionalProperties": False,
 }
+
+# The whole judgement lives here rather than in the schema descriptions,
+# because the hard part isn't the output shape -- it's the corporate-CTA
+# vs real-request distinction, which needs examples to land.
+CLASSIFIER_SYSTEM = """\
+You triage one email from a high school student's inbox and decide \
+whether it describes something he personally has to DO.
+
+CAPTURE when a real person is asking him to do something, or when his \
+school is telling him work is owed. Examples: homework, an essay, a \
+test to study for, a chore from a family member, a form to return, a \
+shift someone asked him to cover, a meeting or rehearsal to attend.
+
+DO NOT CAPTURE marketing, promotions, newsletters, receipts, shipping \
+notices, social media notifications, or security alerts. Urgency in an \
+advertisement is not a task: "sale ends Friday", "your trial expires \
+tomorrow", "last chance to register", "act now" are all marketing \
+deadlines, not obligations. The question is whether a specific human, \
+or his school, is asking HIM for something. A company addressing all \
+its customers at once is not.
+
+If the sender is automated or promotional, answer false even when the \
+subject contains words like assignment, project, due, or test.
+
+When capturing, classify item_type:
+  Assignments - schoolwork he must produce or study for
+  Tasks       - anything else he must do: chores, errands, forms, replies
+  Events      - something he must show up to at a particular time
+
+Set class_name ONLY for a school class or course. Leave it null for \
+chores, errands, and anything not tied to a course.\
+"""
 
 
 def _gmail_service():
@@ -183,17 +265,32 @@ def _mark_seen(service, message_id: str, label_id: str | None):
         print(f"[gmail_scan] could not label {message_id}: {e}", file=sys.stderr)
 
 
-def _extract_assignment(client, subject: str, snippet: str) -> dict | None:
-    """One lightweight Claude call: does this look like an assignment?"""
+def _classify_email(client, subject: str, sender: str, snippet: str) -> dict | None:
+    """
+    One lightweight Claude call: is this something Peter has to do, and
+    if so, what kind of thing is it?
+
+    The sender is included because it carries most of the signal for the
+    distinction that matters -- a person's address reads very differently
+    from noreply@ or marketing@, and the subject line alone often can't
+    tell an ad's deadline from a real one.
+    """
+    # Today's date has to be in the prompt: the model has no clock, and
+    # real mail overwhelmingly uses relative dates ("Thursday at 6pm",
+    # "next Friday", "by tomorrow"). Without it those resolved to null,
+    # and an item with no due date gets NO reminders at all if it's an
+    # Event -- so the capture looked successful and then silently never
+    # fired. In the user turn rather than the system prompt so the
+    # system prompt stays byte-stable and cacheable.
+    today = timeutil.now()
     prompt = (
-        f"Subject: {subject}\n"
-        f"Snippet: {snippet}\n\n"
-        "Does this email describe a specific school assignment, test, or task "
-        "with (or implying) a due date?"
+        f"Today is {today:%A, %B %-d, %Y}.\n\n"
+        f"From: {sender}\nSubject: {subject}\nSnippet: {snippet}"
     )
     resp = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
+        system=CLASSIFIER_SYSTEM,
         output_config={"format": {"type": "json_schema", "schema": ASSIGNMENT_SCHEMA}},
         messages=[{"role": "user", "content": prompt}],
     )
@@ -205,9 +302,24 @@ def _extract_assignment(client, subject: str, snippet: str) -> dict | None:
     if not text:
         return None
     data = json.loads(text)  # schema-constrained, so this is safe
-    if not data.get("is_assignment") or not data.get("task_name"):
+    if not data.get("is_actionable") or not data.get("task_name"):
         return None
     return data
+
+
+def _item_type(parsed: dict, options: list[str]) -> str:
+    """
+    Claude's item_type, validated against the live Notion `Type` options.
+
+    The schema enum already constrains this, so a bad value should be
+    impossible -- but Notion silently creates any select option it is
+    handed, and that failure is invisible until his views are wrong, so
+    it is checked anyway.
+    """
+    chosen = parsed.get("item_type")
+    if chosen in options:
+        return chosen
+    return DEFAULT_ITEM_TYPE if DEFAULT_ITEM_TYPE in options else options[0]
 
 
 def run(known_ids: set[str] | None = None):
@@ -244,6 +356,7 @@ def run(known_ids: set[str] | None = None):
     category_options = notion_client.select_option_names(notion_client.CATEGORY_PROP)
     task_type_options = notion_client.select_option_names(notion_client.TASK_TYPE_PROP)
     priority_options = notion_client.select_option_names(notion_client.PRIORITY_PROP)
+    type_options = notion_client.select_option_names("Type")
     added = skipped = classified = 0
     failures: list[str] = []
 
@@ -272,13 +385,16 @@ def run(known_ids: set[str] | None = None):
                     userId="me",
                     id=msg_ref["id"],
                     format="metadata",
-                    metadataHeaders=["Subject"],
+                    metadataHeaders=["Subject", "From"],
                 )
                 .execute()
             )
             headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
-            parsed = _extract_assignment(
-                client, headers.get("Subject", ""), msg.get("snippet", "")
+            parsed = _classify_email(
+                client,
+                headers.get("Subject", ""),
+                headers.get("From", ""),
+                msg.get("snippet", ""),
             )
             classified += 1
 
@@ -290,6 +406,7 @@ def run(known_ids: set[str] | None = None):
                 _mark_seen(service, msg_ref["id"], label_id)
                 continue
 
+            item_type = _item_type(parsed, type_options)
             notion_client.create_item(
                 name=parsed["task_name"],
                 # Claude can invent a class name that isn't one of Peter's
@@ -298,9 +415,13 @@ def run(known_ids: set[str] | None = None):
                 category=classmap.resolve(parsed.get("class_name"), category_options),
                 due_date=parsed.get("due_date"),
                 source="Email",
+                type_name=item_type,
                 external_id=external_id,
+                # item_type, not a hardcoded "Assignments": it decides the
+                # verb (Events -> Attend) and, more importantly, the whole
+                # reminder cadence.
                 task_type=tasktype.resolve(
-                    parsed["task_name"], "Assignments", task_type_options
+                    parsed["task_name"], item_type, task_type_options
                 ),
                 priority=tasktype.priority(parsed["task_name"], priority_options),
             )
