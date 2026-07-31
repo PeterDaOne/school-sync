@@ -5,9 +5,8 @@ cloud_sync.py via GitHub Actions), parallel to gmail_scan.py.
 
 Unlike email, Classroom coursework arrives as structured data (title,
 due date, course) straight from the API — there's no "does this look
-like an assignment" guess to make. So this doesn't call Claude and
-doesn't use an "[unconfirmed]" prefix: what lands in Notion is exactly
-what's in Classroom.
+like an assignment" guess to make. So this doesn't call Claude at all:
+what lands in Notion is exactly what's in Classroom.
 
 DEDUP
 -----

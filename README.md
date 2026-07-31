@@ -1,8 +1,8 @@
 # School Sync
 
 One input, many outputs. You type or check things off in Notion.
-Calendar, phone reminders, and an unconfirmed-email inbox stay current
-on their own.
+Calendar, phone reminders, and captured email/Classroom items stay
+current on their own.
 
 **Notion database:** https://app.notion.com/p/6524b82ad7dd499896f4c55a86de9290
 Database ID (for `.env`): `6524b82ad7dd499896f4c55a86de9290`
@@ -264,9 +264,11 @@ scheduled run and a dispatched run can overlap, read the same
 - **Add something:** type it into Notion.
 - **Finish something:** set Status → Done. The Calendar event and all
   reminders stop on the next pass.
-- **Email or Classroom adds something:** email items arrive prefixed
-  `[unconfirmed]` — glance at those once a day, correct them, drop the
-  prefix. Classroom items arrive as-is.
+- **Email or Classroom adds something:** it appears as a normal item.
+  Email-sourced ones are inferred by Claude from prose rather than read
+  from structured fields, so give them a glance — filter on
+  `Input Type = Email` to find them. Classroom items come straight from
+  the API and need no review.
 - **Everything else:** happens without you.
 
 ---
@@ -336,7 +338,9 @@ Key ideas worth knowing before you change anything:
   otherwise (via the external dispatch scheduler — see "Beating
   GitHub's scheduler" above; without it, up to ~3.5 hours on the
   built-in cron alone).
-- Email parsing isn't perfect — that's why it lands as `[unconfirmed]`.
+- Email parsing isn't perfect. Captured email items are Claude's
+  reading of prose (title, class and due date are all inferred), so
+  they're worth a glance; `Input Type = Email` is how you find them.
 - Tapping a notification opens the ntfy app briefly before handing off
   to Notion. That's an OS-level constraint on third-party push apps, not
   something this code can fix.

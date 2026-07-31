@@ -3,11 +3,20 @@
 gmail_scan.py — the email capture layer. Cloud-only (runs inside
 cloud_sync.py via GitHub Actions).
 
-Philosophy: email parsing is not infallible, so this never auto-commits
-a deadline. It creates a Notion item with Input Type = "Email" and a
-name prefixed "[unconfirmed]" — Peter glances at it in his daily check
-and confirms or corrects it. A false positive costs five seconds of
-review; a silent auto-add that's wrong costs a missed deadline.
+Email parsing is not infallible: unlike Classroom, where the title, due
+date and course arrive as structured fields, everything here is inferred
+by Claude from prose. So a captured item is worth a glance before it is
+trusted.
+
+That glance used to be prompted by a "[unconfirmed] " prefix on the
+title. **Removed 2026-07-30 on Peter's call, and the reasoning is worth
+keeping:** the provenance is already recorded structurally in
+`Input Type = "Email"`, so the prefix duplicated a signal that already
+existed — and it duplicated it into the Title, which is the one field
+that rides along into every phone notification for the life of the item.
+Filter or colour on `Input Type` in Notion instead; it costs nothing at
+the lock screen. Do not reintroduce the prefix without a reason that
+isn't already covered by that property.
 
 TWO KINDS OF DEDUP, AND WHY BOTH ARE NEEDED
 -------------------------------------------
@@ -268,7 +277,7 @@ def run(known_ids: set[str] | None = None):
             continue
 
         notion_client.create_item(
-            name=f"[unconfirmed] {parsed['task_name']}",
+            name=parsed["task_name"],
             # Claude can invent a class name that isn't one of Peter's
             # Notion options, and Notion would happily create it. Resolve
             # against the real options or leave it blank.
@@ -276,9 +285,6 @@ def run(known_ids: set[str] | None = None):
             due_date=parsed.get("due_date"),
             source="Email",
             external_id=external_id,
-            # Inferred from Claude's task_name, NOT the "[unconfirmed] "
-            # prefix the item is stored under -- that prefix is display
-            # only and would never match a keyword.
             task_type=tasktype.resolve(
                 parsed["task_name"], "Assignments", task_type_options
             ),
@@ -289,7 +295,7 @@ def run(known_ids: set[str] | None = None):
 
     if added or skipped or classified:
         print(
-            f"[gmail_scan] classified {classified}, added {added} unconfirmed item(s), "
+            f"[gmail_scan] classified {classified}, added {added} item(s), "
             f"skipped {skipped} already captured"
         )
 

@@ -213,14 +213,25 @@ class Run(unittest.TestCase):
                 gmail_scan.run(known_ids=set())
         svc.assert_not_called()
 
-    def test_a_classified_assignment_becomes_an_unconfirmed_notion_item(self):
+    def test_a_classified_assignment_becomes_a_notion_item(self):
         svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
         self._run(svc, [ASSIGNMENT])
         self.assertEqual(len(self.created), 1)
         item = self.created[0]
-        self.assertTrue(item["name"].startswith("[unconfirmed] "))
+        self.assertEqual(item["name"], ASSIGNMENT["task_name"])
         self.assertEqual(item["source"], "Email")
         self.assertEqual(item["external_id"], "gmail:m1")
+
+    def test_the_title_carries_no_prefix(self):
+        """
+        REGRESSION. Titles used to be prefixed "[unconfirmed] ". Removed
+        2026-07-30: `Input Type = "Email"` already records provenance
+        structurally, and the Title is the one field that rides into
+        every phone notification for the life of the item.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [ASSIGNMENT])
+        self.assertNotIn("unconfirmed", self.created[0]["name"].lower())
 
     def test_claudes_class_name_is_resolved_against_real_notion_options(self):
         """
