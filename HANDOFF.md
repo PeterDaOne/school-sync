@@ -54,24 +54,30 @@ candidates on its own — the end-to-end test overrode
 created real Notion items, fired real notifications, and been shown not
 to duplicate.
 
-**What is NOT verified, and is the most likely thing to be broken: the
-GitHub secrets.** Everything above was tested by running the code
-locally, and **both capture sweeps run ONLY inside `cloud_sync.py` on
-GitHub Actions** — so local success proves nothing about production.
-Three secrets matter:
+**Cloud Classroom capture is PROVEN, not just assumed.** Verified
+2026-07-31 by archiving the captured Notion row so its External ID
+vanished, then watching it come back: Actions run **#620** succeeded at
+18:22:40Z and the row was created at 18:23:00Z with the correct `For`,
+Task Type, Priority and due date. `local_sync.py` cannot have done it —
+it imports only `config, log, pipeline`, so the capture sweeps exist
+only in `cloud_sync.py`. That single test also confirms the deployed
+`GOOGLE_REFRESH_TOKEN` carries the new Classroom scope (a missing scope
+would raise and turn the run red), and that `shared/tasktype.py` and the
+`_due_date_iso` fix are live in the cloud. **Reuse this technique** —
+archive a captured row and wait ~5 min — it is the cheapest end-to-end
+cloud check available without admin log access.
 
-1. `GOOGLE_REFRESH_TOKEN` — the deployed one may still predate the new
-   Classroom scope. If so, cloud Classroom capture is silently dead
-   while every run stays green.
-2. `ANTHROPIC_API_KEY` — without it `gmail_scan` skips itself cleanly
-   (by design), so cloud Gmail capture simply never happens.
-3. `SCHOOL_EMAIL_HINTS` — **the dangerous one.** Unset it becomes `""`,
-   `_candidate_query` drops the `from:` filter entirely, and the sweep
-   classifies ANY sender whose subject contains "due"/"test"/"project".
-   Adding the API key WITHOUT this is worse than adding neither.
-
-Check an Actions log for `[classroom_scan]` / `[gmail_scan]` lines
-before assuming any of it works.
+**Still NOT independently verified: the `ANTHROPIC_API_KEY` secret.**
+Peter says he added it, and there is no reason to doubt that, but it
+cannot be confirmed from outside. With `SCHOOL_EMAIL_HINTS` now set as a
+secret the cloud Gmail query filters to his school domains, his personal
+mailbox receives none, so the sweep finds 0 candidates and makes no
+Claude call — meaning the run is green and side-effect-free whether the
+key is present or missing. The only way to tell them apart is to read a
+run log (it prints `[gmail_scan] skipped — ANTHROPIC_API_KEY is not
+configured yet` when absent), and per CLAUDE.md that needs admin auth,
+so **Peter has to look while signed in.** It becomes self-evident the
+moment real school mail arrives.
 
 ## What is and isn't committed
 
