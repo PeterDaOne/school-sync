@@ -74,6 +74,12 @@ flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', scopes=[
     'https://www.googleapis.com/auth/gmail.modify',
     'https://www.googleapis.com/auth/classroom.courses.readonly',
     'https://www.googleapis.com/auth/classroom.coursework.me.readonly',
+    # Added 2026-07-30 -- needed to read courseWork on a course you
+    # TEACH rather than take (e.g. a self-created test class). Your real
+    # school account, always a student, will never need this path, but
+    # it's harmless to request and means a future TA/co-teacher
+    # situation already works.
+    'https://www.googleapis.com/auth/classroom.coursework.students.readonly',
 ])
 print('Refresh token:', flow.run_local_server(port=0).refresh_token)
 "

@@ -31,8 +31,9 @@ course at setup time, run once with a large value (e.g. 8760 for a
 year); MAX_NEW_PER_RUN caps how much a single run can import so an
 over-large lookback can't fire hundreds of notifications at once.
 
-Scopes: classroom.courses.readonly + classroom.coursework.me.readonly.
-Google may report the latter back as the granted scope
+Scopes: classroom.courses.readonly + classroom.coursework.me.readonly +
+classroom.coursework.students.readonly (added 2026-07-30, see
+_active_courses). Google may report the second back as the granted scope
 classroom.student-submissions.me.readonly — that's real consolidation
 on Google's side, not an error, and oauthlib raises on the mismatch
 unless OAUTHLIB_RELAX_TOKEN_SCOPE=1 is set.
@@ -48,6 +49,13 @@ from shared import classmap, config, googleauth, notion_client, timeutil
 CLASSROOM_SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.coursework.me.readonly",
+    # Added 2026-07-30, needed to read courseWork on a course Peter
+    # TEACHES rather than takes -- see _active_courses. His real school
+    # account will be a student everywhere and never exercise this path,
+    # but a self-created test class necessarily makes him the owner, and
+    # courseWork.list 403'd without it ("The caller does not have
+    # permission") even though courses.list(teacherId="me") succeeded.
+    "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
 ]
 
 DEFAULT_LOOKBACK_HOURS = 48.0
@@ -92,14 +100,14 @@ def _raise_if_insufficient_scope(e: HttpError):
     raise
 
 
-def _active_courses(service) -> list[dict]:
+def _list_courses(service, **filter_kwargs) -> list[dict]:
     courses = []
     page_token = None
     while True:
         try:
             resp = (
                 service.courses()
-                .list(studentId="me", courseStates=["ACTIVE"], pageToken=page_token)
+                .list(courseStates=["ACTIVE"], pageToken=page_token, **filter_kwargs)
                 .execute()
             )
         except HttpError as e:
@@ -109,6 +117,24 @@ def _active_courses(service) -> list[dict]:
         page_token = resp.get("nextPageToken")
         if not page_token:
             return courses
+
+
+def _active_courses(service) -> list[dict]:
+    """
+    Every ACTIVE course Peter can see, as student OR teacher.
+
+    Added the teacher side 2026-07-30. His real school account will be a
+    student everywhere, so studentId="me" alone was the right call at
+    first -- but it silently returns zero courses for one he teaches or
+    co-teaches, which is exactly the situation testing against a
+    self-created Classroom class puts him in. Two calls, deduped by
+    course id (a course could theoretically list under both if Classroom
+    ever allows that, though it shouldn't in practice).
+    """
+    by_id = {c["id"]: c for c in _list_courses(service, studentId="me")}
+    for c in _list_courses(service, teacherId="me"):
+        by_id.setdefault(c["id"], c)
+    return list(by_id.values())
 
 
 def _recent_coursework(service, course_id: str) -> list[dict]:
