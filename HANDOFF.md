@@ -13,9 +13,10 @@ one-item-at-a-time after it.
 Keep this file current. It is the fast path back into the project after a
 context reset, and a stale handoff is worse than none: it will be trusted.
 
-Last updated: 2026-07-30, built on commit 5e81a19 — this session's
-changes (`Class` -> `For` category rename + ntfy tag fix) are about to
-be committed on top of it; check `git log -1` for the real current hash.
+Last updated: 2026-07-30 (second session that day), on commit 9bba1e1.
+Seven commits from this session are COMMITTED BUT NOT PUSHED — check
+`git status` and `git log origin/main..HEAD` before assuming the cloud
+is running current code.
 
 ---
 
@@ -29,71 +30,25 @@ the last session and is accurate. Don't rediscover what's already there.
 
 ## Where things actually stand
 
-Repo: https://github.com/PeterDaOne/school-sync (public). 223
-stdlib-unittest tests (up from 171 this session), green locally and in
-CI. launchd job loaded and healthy under the new code.
+Repo: https://github.com/PeterDaOne/school-sync (public). **229**
+stdlib-unittest tests, green locally. launchd loaded and healthy.
 
-**UNPUSHED AS OF HANDOFF — check `git status` first.** The cloud runs
-from `main`, so until these commits are pushed GitHub Actions is running
-the OLD cadence and cannot read the renamed `For` property.
+**UNPUSHED.** Seven commits sit on local `main`. Until they're pushed,
+GitHub Actions runs the OLD cadence and cannot read the renamed `For`
+property. This is the first thing to check.
 
 **Verified working against real data:** the whole cloud path (secrets,
-dispatch-based sub-6-min latency, Calendar sync), the reminder engine's
-gating logic (quiet hours, is_complete, capture), and — as of this
-session — the ENTIRE rewritten cadence and message system, live:
-- The continuous formula's real production output was checked against
-  two live items (Task/High/overdue → ~0.5-0.6h interval, exactly the
-  "nag as soon as possible" behavior Peter asked for).
-- A real send caught a real bug: the class emoji in the ntfy Title
-  header broke on `UnicodeEncodeError` (http.client latin-1-encodes str
-  headers by default) — fixed by sending Title as UTF-8 bytes, confirmed
-  against a second live send afterward (emoji rendered correctly).
-- Polled ntfy directly after sending to confirm the actual delivered
-  title/body/priority/tags/click matched what was intended, not just
-  what the code claimed to send.
-- Two consecutive local_sync passes ran clean after reloading launchd
-  with the new code + regenerated plist.
+dispatch-based sub-6-min latency, Calendar sync); the reminder engine
+end to end; the `Class`→`For` rename (all 15 pages kept their values);
+the ntfy tag fix; the 2h hard floor; the load-scaling + true-daily-cap
+volume work (including a live test that the `Reminders Today` counter
+increments same-day, resets across days, and that an exhausted budget
+defers instead of sending). **The mark-done button is confirmed working
+from Peter's actual phone** — he tapped it on a real reminder.
 
-**Also verified live 2026-07-30:** the `For` rename preserved every
-value on all 15 real pages; the notification title/body renders
-correctly for all 10 live incomplete items; three real ntfy sends came
-back with the new emoji intact and the `Tags` header correctly ABSENT;
-both entrypoints ran clean end to end; launchd reloaded and fired.
-
-**The mark-done button is CONFIRMED WORKING FROM PETER'S ACTUAL PHONE**
-(2026-07-30). He tapped it on a real, organically-generated reminder for
-"Make promposal" — 8 taps between 13:33:53 and 13:34:09, all landing on
-the command topic, applied once, no errors. The deliberate no-dedup-cursor
-design ("marking Done twice is a no-op") absorbed all eight cleanly.
-The 8 taps were investigated: ntfy's cache showed only 2 pushes for
-that item, so it was a small stack PLUS repeated tapping of a button
-with no visible feedback (6 taps in 4 seconds). Fixed indirectly --
-repeats are now visibly distinct (see below). **The button giving no
-immediate on-phone feedback is still unaddressed** and is the most
-likely remaining source of confusion.
-
-Setup detail (2026-07-30):
-NTFY_COMMAND_TOPIC was generated into `.env`, the plist regenerated, and
-the full loop driven end to end — a simulated tap (bare page id POSTed
-to the command topic) was picked up by the next `local_sync` pass
-(`applied 1 mark-done command(s)`) and "Do dishes" flipped to Done in
-real Notion. A real notification carrying the button was then sent and
-polled back, confirming the `Actions:` header is on the wire with the
-right page id. **Still unconfirmed: Peter physically tapping it on the
-phone** — everything up to the phone is proven.
-
-**NOT done: the GitHub secret.** `NTFY_COMMAND_TOPIC` is in `.env` but
-not in repo secrets, so the button appears on Mac-sent reminders and is
-absent from cloud-sent ones. Same value, Secrets tab (not Variables).
-
-**Written but NEVER run against real data:** the whole
-capture layer (gmail_scan.py, classroom_scan.py) — its `For` call sites
-were updated and the non-class-category exclusion is unit-tested against
-the live option list, but neither sweep has still ever created a real
-item; four bugs were found in it by code-tracing alone, assume more
-exist.
-
-## Nothing is blocking (see the agenda below for what's next)
+**Written but NEVER run end to end:** the capture layer. `gmail_scan.py`
+has never created a Notion item. `classroom_scan.py` has never created
+one either, though as of this session it CAN finally see a real course.
 
 ## What just shipped (this session, 2026-07-30)
 
@@ -153,54 +108,52 @@ a `.example` file, and that one was replaced with a placeholder.
 
 ## What I want to do this session, in order
 
-Carried over from 2026-07-30, which finished items 0 and 1 and never
-started these. The ordering note still applies: 2 comes before 3
-because defining scenario behavior will change what I want out of the
-capture layer, and if the session runs short, push 3 rather than 4.
+**0. FIRST, before anything else: print the OAuth re-consent command as
+a runnable bash code block so I can actually click it.** Last session it
+was printed as command *output* and I couldn't run it. It is the literal
+blocker for everything below. The exact scope list lives in README §2 —
+read it from there rather than retyping it from memory, and note it now
+includes `classroom.coursework.students.readonly`, which the old refresh
+token does NOT carry.
 
-**1. Define how the workflow should behave for specific scenarios.**
-This is a design conversation before any code. I want to walk through
-real situations — what happens when I add something last-minute, when
-something's overdue for a week, when I have five things due the same
-day, when I mark something done from my phone mid-class, etc. — and
-decide what the system SHOULD do in each. Ask me about the scenarios
-that matter rather than assuming.
+After I run it and paste back the refresh token, walk me through
+updating it in all three places: `.env`, then `python3 generate_plist.py`
++ reload launchd, then the `GOOGLE_REFRESH_TOKEN` GitHub secret. Missing
+the third is a known silent-failure mode in this project.
 
-One concrete input for that conversation, observed live 2026-07-30:
-**the quiet-hours release is still a burst.** Three notifications landed
-at 05:00:48, :49 and :50 — one second apart. MAX_NOTIFICATIONS_PER_PASS
-capped the count at 3, but jitter can't separate them because they
-weren't phase-locked, they were all *held* overnight and released in the
-same pass. That's a different problem from the one the jitter solved,
-and it's a scenario worth deciding on deliberately. Related: the same
-item ("The Odessy") fired 4x in one day with byte-identical text — no
-escalation, no sense of "this is the 4th time".
+**1. Then get Classroom capture actually working, end to end.** I have a
+real test class on my personal Google account: `AP Language &
+Composition Period 3` (course id `871376160217`), which I OWN as the
+teacher. Last session fixed `_active_courses` to see teacher-owned
+courses and added the scope, but nothing has been run against it yet
+because the token predates the scope.
 
-**2. Test and audit the capture layer** (gmail_scan.py,
-classroom_scan.py). Still the largest untested surface in the project:
-written, never run against real data, and four bugs were already found
-in it by code-tracing alone — assume more exist.
+What I want to see: a real assignment I post in that class appears as a
+real row in Notion, with the right `For` (it should resolve to "AP
+Lang"), the right due date, an `External ID`, and a capture notification
+on my phone. Then verify it does NOT duplicate on the next pass.
 
-   HEADS UP, this is partly blocked and you should say so early rather
-   than working around it silently: gmail_scan needs a real
-   ANTHROPIC_API_KEY (still the literal placeholder sk-ant-xxxx) and
-   classroom_scan needs a Google account with actual courses (the OAuth
-   account, petadaone@gmail.com, is my personal one and has zero —
-   verified live, courses.list just returns empty). Tell me what you CAN
-   meaningfully test without those, what needs me to provide something
-   first, and what it'd take to test it properly.
+Assume more bugs. Four were found by code-tracing alone, and this
+session found two more the moment real data touched it — a wrong OAuth
+scope and a hardcoded `studentId="me"` that made the course invisible
+without any error at all.
 
-   Note: don't push me to buy the Anthropic key before item 3 decides
-   whether Gmail capture earns its place. Paying to unblock a feature
-   that might get deleted is backwards.
+**2. Audit the rest of the capture layer while you're in there.**
+`classroom_scan.py` got its first tests this session (6 cases, all on
+`_active_courses`). `_recent_coursework`, `_submitted_coursework_ids`,
+and `_due_date_iso` still have none, and `_due_date_iso` does timezone
+conversion, which is the single most bug-prone thing in this codebase.
 
-**3. Then step back and assess the whole system as a productivity tool,
-not as code.** This is the part I care most about. Does this actually
-propel me toward my goals, or is it just technically impressive? What
-should change, get added, or get REMOVED to make it more effective? Be
-honest — if something is over-engineered, unused, or actively creating
-noise rather than reducing it, say so. I'd rather hear "this feature
-isn't earning its place" than have you defend everything that exists.
+**3. Gmail capture is still blocked and I know it.** `ANTHROPIC_API_KEY`
+is still the literal placeholder `sk-ant-xxxx`. Do NOT push me to buy one
+yet — I want Classroom proven first. What you CAN do without it: test
+query construction, the `school-sync/seen` label logic, External ID
+dedup, and `classmap` resolution with a stubbed classifier. Tell me
+plainly what that does and doesn't prove.
+
+**Ordering note:** if the session runs short, stop after 1. A working
+Classroom capture is worth more than a broad audit of code that still
+hasn't run.
 
 ## Ground rules that were earned the hard way
 
