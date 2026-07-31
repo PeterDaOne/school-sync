@@ -65,6 +65,12 @@ CATEGORY_PROP = "For"
 # just the sum across items whose Last Reminded is today.
 REMINDER_COUNT_PROP = "Reminders Today"
 
+# Both are populated by the capture sweeps via shared/tasktype.py. Like
+# CATEGORY_PROP, whatever is sent must already exist as an option --
+# Notion silently creates any select OR multi-select option it is handed.
+TASK_TYPE_PROP = "Task Type"
+PRIORITY_PROP = "Priority"
+
 MAX_ATTEMPTS = 5
 
 
@@ -192,6 +198,8 @@ def create_item(
     source: str,
     type_name: str = "Assignments",
     external_id: str | None = None,
+    task_type: list[str] | None = None,
+    priority: str | None = None,
 ):
     """
     Used by the Gmail and Classroom sweeps to add an item Peter hasn't
@@ -218,6 +226,12 @@ def create_item(
         "Input Type": {"select": {"name": source}},
         "Type": {"select": {"name": type_name}},
     }
+    # Both must already exist as options -- see shared/tasktype.py, which
+    # filters against the live option list before returning anything.
+    if task_type:
+        properties[TASK_TYPE_PROP] = {"multi_select": [{"name": t} for t in task_type]}
+    if priority:
+        properties[PRIORITY_PROP] = {"select": {"name": priority}}
     if due_date:
         properties["Due Date"] = {"date": {"start": due_date}}
     if external_id:
