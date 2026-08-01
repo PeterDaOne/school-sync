@@ -32,6 +32,40 @@ class ParseEnvFile(unittest.TestCase):
     def test_missing_file_is_empty_not_an_error(self):
         self.assertEqual(config.parse_env_file(Path("/nonexistent/.env")), {})
 
+    def test_strips_trailing_comments(self):
+        """
+        REGRESSION GUARD (2026-07-31). .env.example documents five
+        tunables with an inline note, and the README says
+        `cp .env.example .env`. Without stripping, the value was the
+        whole string including the comment: numeric settings printed a
+        "bad value" warning on every pass and silently used the default,
+        and a commented NTFY_TOPIC would have published to a topic that
+        does not exist.
+        """
+        self.assertEqual(
+            self.parse("ALPHA=3.4   # -> ceiling at ~14 days\n"), {"ALPHA": "3.4"}
+        )
+
+    def test_a_hash_inside_a_value_is_not_a_comment(self):
+        # Only whitespace-then-hash starts a comment, so a topic or
+        # password containing a bare "#" survives.
+        self.assertEqual(self.parse("TOPIC=school#1\n"), {"TOPIC": "school#1"})
+
+    def test_a_quoted_value_keeps_everything_including_hashes(self):
+        # The escape hatch for a secret that really does contain " #".
+        self.assertEqual(
+            self.parse('SECRET="a b #c"\n'), {"SECRET": "a b #c"}
+        )
+
+    def test_every_value_in_the_shipped_example_parses_cleanly(self):
+        """
+        .env.example is what setup copies, so anything unparseable in it
+        is a trap for the next person to follow the README.
+        """
+        example = Path(__file__).resolve().parent.parent / ".env.example"
+        for key, value in config.parse_env_file(example).items():
+            self.assertNotIn("#", value, f"{key} still carries its comment")
+
 
 class Accessors(unittest.TestCase):
     def test_require_raises_with_actionable_message(self):

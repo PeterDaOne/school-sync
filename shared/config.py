@@ -22,6 +22,7 @@ Two things live here:
 """
 
 import os
+import re
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -35,6 +36,24 @@ def parse_env_file(path: Path) -> dict[str, str]:
     Parse plain KEY=value lines. Deliberately minimal — no multiline
     values, no interpolation. Strips optional surrounding quotes so a
     value pasted with quotes still works.
+
+    TRAILING COMMENTS ARE STRIPPED, and that was a real bug (2026-07-31).
+    `.env.example` documents several tunables with an inline note:
+
+        ASSIGNMENT_ALPHA_HOURS_PER_DAY=3.4   # -> ceiling at ~14 days
+
+    and the README says `cp .env.example .env`. Without this, the value
+    was the whole string including the comment. The numeric settings
+    degraded loudly-ish (a "bad value, using <default>" warning on every
+    single pass, five of them), but a *string* setting would have been
+    silently corrupted — a commented NTFY_TOPIC would publish to a topic
+    that doesn't exist, and a commented SCHOOL_TIMEZONE would fall back
+    to Denver while looking configured.
+
+    Only ` #` (whitespace then hash) starts a comment, so a value that
+    legitimately contains a hash — `topic#1` — survives. A QUOTED value
+    is taken verbatim, which is the escape hatch for a secret that really
+    does contain " #".
     """
     values: dict[str, str] = {}
     if not path.exists():
@@ -46,7 +65,9 @@ def parse_env_file(path: Path) -> dict[str, str]:
         key, _, value = line.partition("=")
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
+            values[key.strip()] = value[1:-1]  # quoted: verbatim
+            continue
+        value = re.split(r"\s#", value, maxsplit=1)[0].strip()
         values[key.strip()] = value
     return values
 

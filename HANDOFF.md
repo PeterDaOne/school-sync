@@ -35,7 +35,7 @@ what's already documented; do verify anything you're about to depend on.
 
 ## Where things actually stand
 
-Public repo: https://github.com/PeterDaOne/school-sync. **359 tests**,
+Public repo: https://github.com/PeterDaOne/school-sync. **388 tests**,
 green, gating CI. launchd loaded. Both capture layers proven end to end
 against real data; Classroom additionally proven running in the cloud.
 
@@ -199,7 +199,7 @@ this file previously listed as the biggest unproven thing.
     35 exclusions that do not cover `/c/*/a/*/details` — so Classroom
     Source Links already open the app on iOS and the web on desktop,
     for free.
-13. **Tests 307 → 359.**
+13. **Tests 307 → 388.** New files: `test_settings_parity.py`, `test_calendar_client.py` (which had ZERO coverage despite `_event_times` encoding Google's exclusive all-day end date), `test_generate_plist.py`.
 
 ## Maintaining this file
 

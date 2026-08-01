@@ -54,13 +54,24 @@ token, new Google client secret, new ntfy topic).
 | Script | Runs on | Frequency | Does |
 |---|---|---|---|
 | `local_sync.py` | Your Mac, via `launchd` | Every 60 sec, only while awake | Notion → Calendar, fires reminders |
-| `cloud_sync.py` | GitHub Actions | Every 30 min, always | Gmail + Classroom capture, Notion → Calendar, fires reminders the Mac slept through |
+| `cloud_sync.py` | GitHub Actions | Every ~5 min, always | Gmail + Classroom capture, Notion → Calendar, fires reminders the Mac slept through |
+
+The cloud cadence comes from an **external scheduler** hitting the
+`workflow_dispatch` API, not from the `cron:` in the workflow — GitHub
+throttles sub-hourly schedules hard enough that the cron alone delivered
+runs ~110 minutes apart. See §8; this matters, and the cron expression is
+not the real cadence.
 
 Both fire reminders. They don't double up: `cloud_sync` waits
-`CLOUD_REMINDER_LAG_MINUTES` (default 10) before sending anything, so
-`local_sync` always gets first crack. A reminder still unfired ten
-minutes after it came due means the Mac is asleep, and the cloud takes
-over. Set `CLOUD_REMINDERS=false` to go back to local-only.
+`CLOUD_REMINDER_LAG_MINUTES` (default 5) before sending anything, so
+`local_sync` always gets first crack. A reminder still unfired that long
+after it came due means the Mac is asleep, and the cloud takes over.
+Set `CLOUD_REMINDERS=false` to go back to local-only.
+
+**Captured items skip the lag** — they carry an External ID, and an item
+that did not exist on `local_sync`'s previous pass has no race to lose.
+So a new assignment is announced as soon as the sweep sees it, and the
+dispatch interval (not the lag) is what bounds capture latency.
 
 ---
 
@@ -174,8 +185,10 @@ See `shared/commands.py` for the polling side.
 The button clears itself almost instantly once tapped (ntfy accepting
 its own publish is fast), but the item isn't actually marked Done in
 Notion until the next sync pass picks up the command — up to ~2 minutes
-while the Mac is awake, up to ~10 minutes from the cloud alone. Same
-"not instant" honesty as everything else in this system.
+while the Mac is awake, up to ~5 minutes from the cloud alone (the
+cloud's `10m` poll window is a deliberate overlap, not the latency;
+marking a page Done twice is a no-op). Same "not instant" honesty as
+everything else in this system.
 
 ### 5. Fill in `.env`
 
@@ -415,7 +428,7 @@ Key ideas worth knowing before you change anything:
   anymore. See `.env.example` for the exact constants.
 - The "Mark done" button's tap effect is near-instant, but the Notion
   page doesn't actually flip to Done until the next sync pass notices
-  the command — up to ~2 min locally, ~10 min from the cloud alone.
+  the command — up to ~2 min locally, ~5 min from the cloud alone.
 - `shared/classmap.py`'s `CATEGORY_EMOJI` dict is keyed by exact Notion
   `For` option names. Rename an option in Notion and it silently falls
   back to its Type emoji (📝/☑️/📅 — the title still works, it just

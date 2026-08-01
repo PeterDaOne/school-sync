@@ -2,10 +2,15 @@
 """
 cloud_sync.py — the safety net.
 
-Runs every 30 minutes on GitHub's servers, completely independent of
+Runs every ~5 minutes on GitHub's servers, completely independent of
 whether the Mac is on, asleep, or in a backpack. Does everything
 local_sync.py does (Notion -> Calendar, reminders) PLUS the Gmail and
 Classroom capture sweeps, neither of which needs sub-minute freshness.
+
+That cadence comes from an EXTERNAL scheduler calling the
+workflow_dispatch API, not from the `cron:` in the workflow -- GitHub
+deprioritizes sub-hourly schedules badly enough that the cron alone
+delivered runs ~110 minutes apart when measured. See README section 8.
 
 REMINDERS FROM THE CLOUD
 ------------------------
@@ -14,7 +19,7 @@ not, which meant no reminders at all whenever the Mac was closed — i.e.
 most of the school day, which is exactly when they matter.
 
 It defers to local_sync rather than racing it: reminders are evaluated
-with a ten-minute lag (CLOUD_REMINDER_LAG_MINUTES), so a reminder is
+with a lag (CLOUD_REMINDER_LAG_MINUTES, default 5), so a reminder is
 only sent from here if it has been due that long without local_sync
 firing it — which only happens if the Mac is asleep. Last Reminded is
 also re-read immediately before each send as a final guard. See

@@ -2,7 +2,7 @@
 Shared sync-state tracking.
 
 Both local_sync.py (every 60s on the Mac, only while awake) and
-cloud_sync.py (every 30 min on GitHub Actions, always) need to agree on
+cloud_sync.py (every ~5 min on GitHub Actions, always) need to agree on
 "what have we already synced" so they don't create duplicate Calendar
 events for the same item.
 
