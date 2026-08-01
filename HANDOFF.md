@@ -35,7 +35,7 @@ what's already documented; do verify anything you're about to depend on.
 
 ## Where things actually stand
 
-Public repo: https://github.com/PeterDaOne/school-sync. **414 tests**,
+Public repo: https://github.com/PeterDaOne/school-sync. **416 tests**,
 green, gating CI. launchd loaded. **Both capture layers are now proven
 end to end AND proven running in the cloud** — Classroom on 2026-07-31,
 Gmail on 2026-08-01 (row `Count 1 to 10` created inside dispatch run
@@ -224,20 +224,26 @@ this file previously listed as the biggest unproven thing.
     from a clean slate the sweep reported `classified 1 message(s),
     added 2 item(s)` — two rows from one email in a single pass — and a
     cloud dispatch independently did the same on the same message.
-14. **Peter's `Type` taxonomy, stated 2026-08-01 and now implemented.**
-    Events = something you show up to at a set time OR a graded thing
-    happening only once a quarter/semester/year (final, recital);
-    Assignments = anything a teacher assigns for a class, graded or not;
-    Tasks = everything else. The "teacher-assigned" test beats "for a
-    grade" where they diverge, so ungraded teacher-set reading stays an
-    Assignment. Verified 6/6 live, including a weekly quiz correctly
-    staying an Assignment rather than becoming an Event.
-15. **`EVENT_REMINDER_DAYS` (new tunable, default `14,7,3,1,0`).**
-    Forced by the taxonomy above: putting graded once-a-semester work in
-    the Event type made a final exam the LEAST-reminded item in the
-    system (3 notifications, none before 3 days out). Ungraded Events
-    like Prom get the extra 14/7-day nudge too — accepted cost.
-16. **Tests 307 → 414.** New files: `test_settings_parity.py`, `test_calendar_client.py` (which had ZERO coverage despite `_event_times` encoding Google's exclusive all-day end date), `test_generate_plist.py`.
+14. **Peter's `Type` taxonomy, and the PAIRING model (2026-08-01).**
+    Assignments = anything a teacher assigns for a class, graded or not
+    ("teacher-assigned" beats "for a grade" where they diverge, so
+    ungraded teacher-set reading stays an Assignment). Events = it
+    happens at a set time and you must be there. Tasks = everything
+    else.
+
+    **Some things are BOTH and are captured as two rows:** the preparing
+    is an Assignment, the doing-it-live is an Event. A class
+    presentation, a recital, a final exam. Ordinary submitted work is
+    NOT split — handing something in is not an occasion. Verified 6/6
+    live in both directions (three split correctly, three correctly
+    stayed single).
+15. **`EVENT_REMINDER_DAYS` exists but is back at its original
+    `3,1,0`.** Briefly widened to `14,7,3,1,0` to give graded Events
+    study runway; the pairing model made that unnecessary and it was
+    reverted. **Prep runway is the paired Assignment's job.** If a
+    graded Event looks under-reminded, check its Assignment was
+    captured — do not add tiers. A regression test guards this.
+16. **Tests 307 → 416.** New files: `test_settings_parity.py`, `test_calendar_client.py` (which had ZERO coverage despite `_event_times` encoding Google's exclusive all-day end date), `test_generate_plist.py`.
 
 ## Maintaining this file
 

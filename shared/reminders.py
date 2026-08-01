@@ -131,18 +131,21 @@ DEFAULT_EVENT_REMINDER_HOUR = "07:00"
 # Calendar days before an Event to remind, at EVENT_REMINDER_HOUR. 0 is
 # the morning of.
 #
-# Was 3/1/0. Widened 2026-08-01, Peter's call, because his own taxonomy
-# put GRADED things in this type: a final exam, a recital or a one-off
-# presentation is an Event when it only happens once a quarter, semester
-# or year. Three days of warning is no study runway at all for a final,
-# and it made the highest-stakes item in the system the least-reminded
-# one -- ~3 notifications where an Assignment three weeks out gets ~10.
+# 3/1/0 is the original and CORRECT cadence, restored 2026-08-01 after a
+# brief detour to 14/7/3/1/0.
 #
-# This deliberately also affects ungraded Events (Prom, a rehearsal),
-# which now get a 14- and 7-day nudge. That is two extra notifications
-# over a fortnight and is the accepted cost of not special-casing
-# "graded" into a second Event cadence.
-DEFAULT_EVENT_REMINDER_DAYS = "14,7,3,1,0"
+# The detour was an attempt to give a graded Event (a final, a recital)
+# study runway, since three days of warning is none. Peter's answer was
+# better and made the cadence change unnecessary: a presentation is TWO
+# things. The preparing is an Assignment, the presenting is an Event.
+# Prep runway is the Assignment cadence's job -- it already nags early
+# and scales with urgency -- and the Event only has to say "this is
+# happening, be there". Widening Event tiers was solving the Assignment's
+# problem in the wrong type, and it taxed every ungraded Event (Prom, a
+# rehearsal) with two extra notifications to do it.
+#
+# See gmail_scan.CLASSIFIER_SYSTEM for how the split is produced.
+DEFAULT_EVENT_REMINDER_DAYS = "3,1,0"
 
 # Overdue back-off (added 2026-07-30). Interval multiplies by
 # OVERDUE_DECAY_BASE for each full day an item stays overdue, until it
@@ -340,7 +343,7 @@ class Cadence:
     jitter_fraction: float = DEFAULT_JITTER_FRACTION
     max_per_pass: int = DEFAULT_MAX_PER_PASS
     event_reminder_hour: dtime = dtime(7, 0)
-    event_reminder_days: tuple[int, ...] = (14, 7, 3, 1, 0)
+    event_reminder_days: tuple[int, ...] = (3, 1, 0)
     overdue_decay_base: float = DEFAULT_OVERDUE_DECAY_BASE
     overdue_max_interval: float = DEFAULT_OVERDUE_MAX_INTERVAL
     daily_budget: int = DEFAULT_DAILY_BUDGET

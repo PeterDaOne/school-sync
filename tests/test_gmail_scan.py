@@ -559,6 +559,51 @@ class Run(unittest.TestCase):
         self.assertEqual(set(enum), set(classmap.NON_CLASS_CATEGORIES))
         self.assertIn("category", gmail_scan.ITEM_SCHEMA["required"])
 
+    def test_a_paired_assignment_and_event_becomes_two_rows(self):
+        """
+        Peter's model (2026-08-01): a presentation is TWO things. The
+        preparing is an Assignment, the presenting is an Event, and he
+        tracks them separately -- different cadences, checked off
+        independently.
+
+        This is also what let Event tiers stay at 3/1/0: prep runway is
+        the Assignment's job, not the Event's.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[
+            {**ASSIGNMENT, "task_name": "Prepare Gatsby presentation",
+             "item_type": "Assignments", "due_date": "2026-11-12"},
+            {**ASSIGNMENT, "task_name": "Present Gatsby project to the class",
+             "item_type": "Events", "due_date": "2026-11-12"},
+        ]])
+        self.assertEqual(
+            [(c["type_name"], c["name"]) for c in self.created],
+            [("Assignments", "Prepare Gatsby presentation"),
+             ("Events", "Present Gatsby project to the class")],
+        )
+
+    def test_the_pair_gets_independent_external_ids(self):
+        # They must be separately checkable off, so they cannot collide.
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[
+            {**ASSIGNMENT, "task_name": "Prepare", "item_type": "Assignments"},
+            {**ASSIGNMENT, "task_name": "Present", "item_type": "Events"},
+        ]])
+        ids = [c["external_id"] for c in self.created]
+        self.assertEqual(ids, ["gmail:m1", "gmail:m1#2"])
+        self.assertEqual(len(set(ids)), 2)
+
+    def test_the_prompt_forbids_splitting_ordinary_submitted_work(self):
+        """
+        The failure mode to guard against is OVER-splitting: an essay is
+        one Assignment, not "write it" plus "hand it in". Handing
+        something in is not an occasion.
+        """
+        self.assertIn("DO NOT split ordinary submitted work",
+                      gmail_scan.CLASSIFIER_SYSTEM)
+        self.assertIn("has to BE somewhere and do it live",
+                      gmail_scan.CLASSIFIER_SYSTEM)
+
     def test_one_email_can_produce_several_items(self):
         """
         The 2026-08-01 fix. A single object schema forced the model to

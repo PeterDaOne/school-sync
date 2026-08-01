@@ -567,38 +567,33 @@ class EventReminders(unittest.TestCase):
         kw.setdefault("due_date", "2026-08-07T19:00:00.000-06:00")
         return item(name="Prom", type_name="Events", **kw)
 
-    def test_fourteen_days_before_gives_study_runway(self):
+    def test_events_stay_quiet_further_out_than_three_days(self):
         """
-        Added 2026-08-01. Peter's taxonomy puts GRADED once-a-semester
-        items (a final, a recital) in this type, so an Event needs prep
-        time. With only 3/1/0 tiers the highest-stakes item in the system
-        was also the least reminded.
+        REGRESSION GUARD against re-widening these tiers.
+
+        They were briefly 14/7/3/1/0 on 2026-08-01, to give a graded
+        Event (a final, a recital) study runway. Peter's answer was
+        better and reverted it: a presentation is TWO items -- an
+        Assignment for preparing and an Event for presenting. Runway is
+        the Assignment cadence's job, which already nags early and scales
+        with urgency. Widening Event tiers solved the Assignment's
+        problem in the wrong type and taxed every ungraded Event (Prom,
+        a rehearsal) with two extra notifications to do it.
+
+        If a graded Event ever looks under-reminded, the fix is to check
+        that its paired Assignment was captured -- not to add tiers here.
         """
-        r = reminders.due_for_reminder(
-            self.event(last_reminded="2026-07-01T00:00:00-06:00"),
-            at("2026-07-24T07:00"),
-            cadence=CADENCE,
-        )
-        self.assertIsNotNone(r)
-        self.assertEqual(r.body, "Prom — in 14 days")
+        for days_out, day in ((14, "2026-07-24"), (10, "2026-07-28"), (7, "2026-07-31")):
+            r = reminders.due_for_reminder(
+                self.event(last_reminded="2026-07-01T00:00:00-06:00"),
+                at(f"{day}T07:00"),
+                cadence=CADENCE,
+            )
+            self.assertIsNone(r, f"{days_out} days out should be silent")
 
-    def test_seven_days_before_fires_too(self):
-        r = reminders.due_for_reminder(
-            self.event(last_reminded="2026-07-01T00:00:00-06:00"),
-            at("2026-07-31T07:00"),
-            cadence=CADENCE,
-        )
-        self.assertIsNotNone(r)
-        self.assertEqual(r.body, "Prom — in 7 days")
-
-    def test_a_day_that_is_not_a_tier_stays_silent(self):
-        # 10 days out is between the 14 and 7 tiers.
-        r = reminders.due_for_reminder(
-            self.event(last_reminded="2026-07-01T00:00:00-06:00"),
-            at("2026-07-28T07:00"),
-            cadence=CADENCE,
-        )
-        self.assertIsNone(r)
+    def test_the_default_tiers_are_the_original_three(self):
+        self.assertEqual(reminders.Cadence().event_reminder_days, (3, 1, 0))
+        self.assertEqual(reminders.DEFAULT_EVENT_REMINDER_DAYS, "3,1,0")
 
     def test_the_tiers_are_configurable(self):
         narrow = replace(CADENCE, event_reminder_days=(1, 0))

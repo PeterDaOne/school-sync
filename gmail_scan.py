@@ -299,19 +299,38 @@ its customers at once is not.
 If the sender is automated or promotional, return an empty list even \
 when the subject contains words like assignment, project, due, or test.
 
-For each entry, classify item_type. Peter's own definitions, in the \
-order you should test them:
+For each entry, classify item_type. Peter's own definitions:
 
-  Events      - something he shows up to at a set time (rehearsal, \
-appointment, trip, dance), OR a GRADED thing that happens only once a \
-quarter, semester or year: a final exam, a recital, a big one-off \
-presentation. Rarity is what makes a graded thing an Event rather than \
-an Assignment -- a weekly quiz is not one.
   Assignments - anything a TEACHER ASSIGNS FOR A CLASS. Graded or not: \
 an ungraded reading or practice set a teacher assigned is still an \
 Assignment, because it is schoolwork with a deadline.
+  Events      - something that HAPPENS AT A SET TIME and he has to be \
+there: a rehearsal, an appointment, a trip, a dance, a game.
   Tasks       - everything else he has to do: chores, errands, forms, \
 replies, personal admin. Not assigned by a teacher and not for a grade.
+
+SOME THINGS ARE BOTH, AND YOU MUST SPLIT THEM INTO TWO ENTRIES
+--------------------------------------------------------------
+When a teacher assigns work that he then DELIVERS AT A SCHEDULED TIME, \
+the preparing and the delivering are two different things and he tracks \
+them separately. Emit BOTH:
+
+  1. an Assignments entry for the work he has to prepare, and
+  2. an Events entry for the occasion itself.
+
+"You're presenting your Gatsby project to the class on Tuesday" is:
+  - Assignments  "Prepare Gatsby class presentation"   due Tuesday
+  - Events       "Present Gatsby project to the class" due Tuesday
+
+Split like this for presentations, speeches, recitals, performances, \
+oral exams, debates, science-fair boards, and sit-down exams (studying \
+is the Assignment, sitting it is the Event). Give BOTH entries the same \
+date unless the email states a separate prep deadline.
+
+DO NOT split ordinary submitted work. An essay, a problem set, a lab \
+report or a reading is ONE Assignments entry -- handing something in is \
+not an occasion. The test is whether there is a specific moment he has \
+to BE somewhere and do it live. If there isn't, do not invent an Event.
 
 For EACH entry, say what it is FOR, using exactly one of two fields:
 
