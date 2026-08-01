@@ -72,12 +72,16 @@ this file previously listed as the biggest unproven thing.
 ## What is NOT proven
 
 - **Gmail capture has never run in the cloud.** Every real call so far
-  has been local. `ANTHROPIC_API_KEY` as a GitHub secret cannot be
-  verified from outside and that is permanent, not a to-do: with
-  `SCHOOL_EMAIL_HINTS` filtering to school domains and Peter's personal
-  mailbox receiving none, present and missing keys produce byte-identical
-  green runs. Only a run log distinguishes them, and that needs admin
-  auth. Ask Peter to look; don't burn time inferring it.
+  has been local. Peter believes `ANTHROPIC_API_KEY` is set as a GitHub
+  secret (2026-07-31) but that has not been confirmed. **It is now cheap
+  to confirm, which it previously was not:** removing the subject-keyword
+  filter and adding consumer domains to `SCHOOL_EMAIL_HINTS` means the
+  cloud sweep finds real candidates, so send an email to the account,
+  wait ~5 minutes, and check for a Notion row with `Input Type = Email`.
+  `local_sync.py` cannot capture anything, so a row that appears was
+  created by GitHub Actions. That also settles "has Gmail capture ever
+  run in the cloud" in the same test. Older notes calling this
+  permanently unverifiable describe the pre-2026-07-31 filter.
 - **The Gmail `Source Link` has not been clicked.** The URL shape is
   pinned by tests and the `authuser=` form is deliberate (`u/0` means
   "first signed-in account", which breaks once school + personal are both
