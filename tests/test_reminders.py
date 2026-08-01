@@ -14,6 +14,7 @@ an approximation.
 """
 
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 
 from tests.context import at
@@ -565,6 +566,49 @@ class EventReminders(unittest.TestCase):
     def event(self, **kw):
         kw.setdefault("due_date", "2026-08-07T19:00:00.000-06:00")
         return item(name="Prom", type_name="Events", **kw)
+
+    def test_fourteen_days_before_gives_study_runway(self):
+        """
+        Added 2026-08-01. Peter's taxonomy puts GRADED once-a-semester
+        items (a final, a recital) in this type, so an Event needs prep
+        time. With only 3/1/0 tiers the highest-stakes item in the system
+        was also the least reminded.
+        """
+        r = reminders.due_for_reminder(
+            self.event(last_reminded="2026-07-01T00:00:00-06:00"),
+            at("2026-07-24T07:00"),
+            cadence=CADENCE,
+        )
+        self.assertIsNotNone(r)
+        self.assertEqual(r.body, "Prom — in 14 days")
+
+    def test_seven_days_before_fires_too(self):
+        r = reminders.due_for_reminder(
+            self.event(last_reminded="2026-07-01T00:00:00-06:00"),
+            at("2026-07-31T07:00"),
+            cadence=CADENCE,
+        )
+        self.assertIsNotNone(r)
+        self.assertEqual(r.body, "Prom — in 7 days")
+
+    def test_a_day_that_is_not_a_tier_stays_silent(self):
+        # 10 days out is between the 14 and 7 tiers.
+        r = reminders.due_for_reminder(
+            self.event(last_reminded="2026-07-01T00:00:00-06:00"),
+            at("2026-07-28T07:00"),
+            cadence=CADENCE,
+        )
+        self.assertIsNone(r)
+
+    def test_the_tiers_are_configurable(self):
+        narrow = replace(CADENCE, event_reminder_days=(1, 0))
+        self.assertIsNone(
+            reminders.due_for_reminder(
+                self.event(last_reminded="2026-07-01T00:00:00-06:00"),
+                at("2026-07-24T07:00"),
+                cadence=narrow,
+            )
+        )
 
     def test_three_days_before_at_the_marker_hour(self):
         r = reminders.due_for_reminder(

@@ -126,6 +126,11 @@ jobs:
           # The hard floor: nothing notifies twice inside this window.
           MIN_INTERVAL_HOURS: ${{ vars.MIN_INTERVAL_HOURS || '2.0' }}
           EVENT_REMINDER_HOUR: ${{ vars.EVENT_REMINDER_HOUR || '07:00' }}
+          # Calendar days before an Event to remind. Widened from 3,1,0
+          # on 2026-08-01: Peter's taxonomy puts graded once-a-semester
+          # things (finals, recitals) in this type, and three days is no
+          # study runway.
+          EVENT_REMINDER_DAYS: ${{ vars.EVENT_REMINDER_DAYS || '14,7,3,1,0' }}
           CLOUD_REMINDERS: ${{ vars.CLOUD_REMINDERS || 'true' }}
           CLOUD_REMINDER_LAG_MINUTES: ${{ vars.CLOUD_REMINDER_LAG_MINUTES || '5' }}
           CLASSROOM_LOOKBACK_HOURS: ${{ vars.CLASSROOM_LOOKBACK_HOURS || '48' }}

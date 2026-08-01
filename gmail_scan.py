@@ -299,10 +299,19 @@ its customers at once is not.
 If the sender is automated or promotional, return an empty list even \
 when the subject contains words like assignment, project, due, or test.
 
-For each entry, classify item_type:
-  Assignments - schoolwork he must produce or study for
-  Tasks       - anything else he must do: chores, errands, forms, replies
-  Events      - something he must show up to at a particular time
+For each entry, classify item_type. Peter's own definitions, in the \
+order you should test them:
+
+  Events      - something he shows up to at a set time (rehearsal, \
+appointment, trip, dance), OR a GRADED thing that happens only once a \
+quarter, semester or year: a final exam, a recital, a big one-off \
+presentation. Rarity is what makes a graded thing an Event rather than \
+an Assignment -- a weekly quiz is not one.
+  Assignments - anything a TEACHER ASSIGNS FOR A CLASS. Graded or not: \
+an ungraded reading or practice set a teacher assigned is still an \
+Assignment, because it is schoolwork with a deadline.
+  Tasks       - everything else he has to do: chores, errands, forms, \
+replies, personal admin. Not assigned by a teacher and not for a grade.
 
 For EACH entry, say what it is FOR, using exactly one of two fields:
 

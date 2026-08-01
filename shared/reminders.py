@@ -53,14 +53,21 @@ Cadence rules:
     first reminder and never re-converge, without needing any shared
     state between them.
 
-  - Events: exactly three fixed-point reminders — 3 days before, 1 day
-    before, and the morning of (all at EVENT_REMINDER_HOUR, a fixed
-    local time, computed from CALENDAR-day difference so a 9pm event 3
-    days out fires at 7am, not at hour-72-exactly) — plus a 4th,
-    1-hour-before, but ONLY for events with a time component (a
-    date-only event has no "1 hour before" to compute). Priority and
-    jitter don't apply to Events — four fixed points don't need
-    desynchronizing.
+  - Events: fixed-point reminders on the calendar days in
+    EVENT_REMINDER_DAYS (default 14, 7, 3, 1 and 0 = morning of), all at
+    EVENT_REMINDER_HOUR, a fixed local time, computed from CALENDAR-day
+    difference so a 9pm event 3 days out fires at 7am, not at
+    hour-72-exactly — plus one more, 1-hour-before, but ONLY for events
+    with a time component (a date-only event has no "1 hour before" to
+    compute). Priority and jitter don't apply to Events; a handful of
+    fixed points don't need desynchronizing.
+
+    The 14- and 7-day tiers were added 2026-08-01 because Peter's own
+    taxonomy puts GRADED items in this type: an Event is either
+    something you show up to, or a graded thing that happens only once a
+    quarter, semester or year (a final, a recital). With only 3/1/0, the
+    single highest-stakes item in the system was also the least
+    reminded — three notifications, none earlier than three days out.
 
 Every type is gated on Status: nothing reminds once an item reaches the
 complete group. An earlier version of this docstring claimed Events were
@@ -120,6 +127,22 @@ DEFAULT_PRIORITY_MULTIPLIER_LOW = 2.0
 DEFAULT_JITTER_FRACTION = 0.25
 DEFAULT_MAX_PER_PASS = 3
 DEFAULT_EVENT_REMINDER_HOUR = "07:00"
+
+# Calendar days before an Event to remind, at EVENT_REMINDER_HOUR. 0 is
+# the morning of.
+#
+# Was 3/1/0. Widened 2026-08-01, Peter's call, because his own taxonomy
+# put GRADED things in this type: a final exam, a recital or a one-off
+# presentation is an Event when it only happens once a quarter, semester
+# or year. Three days of warning is no study runway at all for a final,
+# and it made the highest-stakes item in the system the least-reminded
+# one -- ~3 notifications where an Assignment three weeks out gets ~10.
+#
+# This deliberately also affects ungraded Events (Prom, a rehearsal),
+# which now get a 14- and 7-day nudge. That is two extra notifications
+# over a fortnight and is the accepted cost of not special-casing
+# "graded" into a second Event cadence.
+DEFAULT_EVENT_REMINDER_DAYS = "14,7,3,1,0"
 
 # Overdue back-off (added 2026-07-30). Interval multiplies by
 # OVERDUE_DECAY_BASE for each full day an item stays overdue, until it
@@ -205,6 +228,7 @@ TUNABLE_ENV_VARS = (
     "REMINDER_JITTER_FRACTION",
     "MAX_NOTIFICATIONS_PER_PASS",
     "EVENT_REMINDER_HOUR",
+    "EVENT_REMINDER_DAYS",
     "OVERDUE_DECAY_BASE",
     "OVERDUE_MAX_INTERVAL_HOURS",
     "DAILY_NOTIFICATION_BUDGET",
@@ -235,6 +259,29 @@ def _parse_float(raw: str, fallback: float, label: str) -> float:
         print(f"[reminders] {label} must be > 0 (got {value}), using {fallback}")
         return fallback
     return value
+
+
+def _parse_days(raw: str, fallback: str, label: str) -> tuple[int, ...]:
+    """
+    Parse "14,7,3,1,0" into (14, 7, 3, 1, 0).
+
+    Sorted descending and deduped so the tiers are tried furthest-out
+    first, and a typo'd duplicate can't make one day fire twice. Falls
+    back rather than raising -- a bad value here must not take the sync
+    down, and it certainly must not silently mean "no event reminders".
+    """
+    def parse(text: str) -> tuple[int, ...]:
+        return tuple(sorted({int(p) for p in text.split(",") if p.strip()}, reverse=True))
+
+    try:
+        days = parse(raw)
+    except (TypeError, ValueError):
+        print(f"[reminders] bad {label} value {raw!r}, using {fallback}")
+        return parse(fallback)
+    if not days or any(d < 0 for d in days):
+        print(f"[reminders] {label} must be non-negative days (got {raw!r}), using {fallback}")
+        return parse(fallback)
+    return days
 
 
 def _parse_int(raw: str, fallback: int, label: str) -> int:
@@ -293,6 +340,7 @@ class Cadence:
     jitter_fraction: float = DEFAULT_JITTER_FRACTION
     max_per_pass: int = DEFAULT_MAX_PER_PASS
     event_reminder_hour: dtime = dtime(7, 0)
+    event_reminder_days: tuple[int, ...] = (14, 7, 3, 1, 0)
     overdue_decay_base: float = DEFAULT_OVERDUE_DECAY_BASE
     overdue_max_interval: float = DEFAULT_OVERDUE_MAX_INTERVAL
     daily_budget: int = DEFAULT_DAILY_BUDGET
@@ -377,6 +425,11 @@ class Cadence:
             event_reminder_hour=_parse_hhmm(
                 config.optional("EVENT_REMINDER_HOUR", DEFAULT_EVENT_REMINDER_HOUR),
                 DEFAULT_EVENT_REMINDER_HOUR,
+            ),
+            event_reminder_days=_parse_days(
+                config.optional("EVENT_REMINDER_DAYS", DEFAULT_EVENT_REMINDER_DAYS),
+                DEFAULT_EVENT_REMINDER_DAYS,
+                "EVENT_REMINDER_DAYS",
             ),
             overdue_decay_base=_parse_float(
                 config.optional("OVERDUE_DECAY_BASE", str(DEFAULT_OVERDUE_DECAY_BASE)),
@@ -768,7 +821,7 @@ def _evaluate(item: dict, now: datetime, cadence: Cadence, lag: timedelta) -> Re
         # 0/1/3 it equals, today's date at event_reminder_hour is the
         # marker for that tier.
         days_before = timeutil.calendar_days_between(due, effective)
-        if days_before in (0, 1, 3):
+        if days_before in cadence.event_reminder_days:
             today = effective.astimezone(timeutil.school_tz()).date()
             marker = datetime.combine(
                 today, cadence.event_reminder_hour, tzinfo=timeutil.school_tz()
