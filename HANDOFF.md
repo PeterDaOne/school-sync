@@ -35,7 +35,7 @@ what's already documented; do verify anything you're about to depend on.
 
 ## Where things actually stand
 
-Public repo: https://github.com/PeterDaOne/school-sync. **416 tests**,
+Public repo: https://github.com/PeterDaOne/school-sync. **422 tests**,
 green, gating CI. launchd loaded. **Both capture layers are now proven
 end to end AND proven running in the cloud** — Classroom on 2026-07-31,
 Gmail on 2026-08-01 (row `Count 1 to 10` created inside dispatch run
@@ -243,7 +243,21 @@ this file previously listed as the biggest unproven thing.
     reverted. **Prep runway is the paired Assignment's job.** If a
     graded Event looks under-reminded, check its Assignment was
     captured — do not add tiers. A regression test guards this.
-16. **Tests 307 → 416.** New files: `test_settings_parity.py`, `test_calendar_client.py` (which had ZERO coverage despite `_event_times` encoding Google's exclusive all-day end date), `test_generate_plist.py`.
+16. **The system under-notified at scale — found by simulation, fixed.**
+    Peter asked whether the hard cap would make him miss things at a
+    real assignment load. Simulated a week through the real engine at
+    6/18/32/55 items: at 32 items, SEVEN items got zero notification in
+    their final 48h — but volume was only 2.4/day against a budget
+    allowing 6, so **the cap was not the cause.** `load_scale`
+    (active/5) stretched intervals 6–11×, so at 55 items an assignment
+    due in two days was reminded every 73.8h, longer than it had left.
+    Two hypotheses were tested and killed: reordering due-soon ahead of
+    overdue changed nothing, and an 85% completion rate did not rescue
+    it either. Fixed with `DEADLINE_GUARANTEE_FRACTION` (0.33 — an
+    interval may never exceed that fraction of the time remaining) plus
+    budget 6 → 10. Result: 0 missed at 18 items, 3 at 32, 5 at 55, with
+    volume still under 5/day.
+17. **Tests 307 → 422.** New files: `test_settings_parity.py`, `test_calendar_client.py` (which had ZERO coverage despite `_event_times` encoding Google's exclusive all-day end date), `test_generate_plist.py`.
 
 ## Maintaining this file
 

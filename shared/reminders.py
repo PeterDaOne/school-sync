@@ -54,7 +54,7 @@ Cadence rules:
     state between them.
 
   - Events: fixed-point reminders on the calendar days in
-    EVENT_REMINDER_DAYS (default 14, 7, 3, 1 and 0 = morning of), all at
+    EVENT_REMINDER_DAYS (default 3, 1 and 0 = morning of), all at
     EVENT_REMINDER_HOUR, a fixed local time, computed from CALENDAR-day
     difference so a 9pm event 3 days out fires at 7am, not at
     hour-72-exactly — plus one more, 1-hour-before, but ONLY for events
@@ -62,12 +62,14 @@ Cadence rules:
     compute). Priority and jitter don't apply to Events; a handful of
     fixed points don't need desynchronizing.
 
-    The 14- and 7-day tiers were added 2026-08-01 because Peter's own
-    taxonomy puts GRADED items in this type: an Event is either
-    something you show up to, or a graded thing that happens only once a
-    quarter, semester or year (a final, a recital). With only 3/1/0, the
-    single highest-stakes item in the system was also the least
-    reminded — three notifications, none earlier than three days out.
+    Three days is the right amount of warning for "be there", because
+    an Event that needs PREPARING is captured as a pair: an Assignment
+    for the preparing and an Event for the occasion (see
+    gmail_scan.CLASSIFIER_SYSTEM). Prep runway is the Assignment
+    cadence's job. Tiers were briefly widened to 14/7/3/1/0 on
+    2026-08-01 to give graded Events runway, then reverted when the
+    pairing model made that unnecessary — it was solving the
+    Assignment's problem in the wrong type.
 
 Every type is gated on Status: nothing reminds once an item reaches the
 complete group. An earlier version of this docstring claimed Events were
@@ -164,7 +166,7 @@ _MAX_DECAY_DOUBLINGS = 16
 # 4 items -> 41 pushes/week, but a realistic 24-item load -> 333/week
 # with a peak of 69 in a single day. Load scaling smooths the cadence;
 # this is the backstop for the days it isn't enough.
-DEFAULT_DAILY_BUDGET = 6
+DEFAULT_DAILY_BUDGET = 10
 
 # THE HARD FLOOR: no item may ever notify twice inside this window.
 # Peter's rule, 2026-07-30, and it is deliberately blunt -- it overrides
@@ -199,6 +201,31 @@ DEFAULT_MIN_INTERVAL_HOURS = 2.0
 # pipeline already knows how many active items there are, so this needs
 # no schema change and nothing persisted.
 DEFAULT_LOAD_SCALE_TARGET = 5
+
+# THE DEADLINE GUARANTEE (added 2026-08-01, and it is a floor on how
+# ATTENTIVE the system may be, not a ceiling on how loud).
+#
+# An item's interval may never exceed this fraction of the time it has
+# left, so it always gets roughly 1/fraction reminders before it is due,
+# whatever else is going on.
+#
+# It exists because load scaling could stretch an interval past the
+# item's own deadline. Measured against a realistic load: at 55 active
+# items the scale is 11x, so an assignment due in TWO DAYS was reminded
+# every 73.8 hours -- longer than the 48 hours it had left. It could get
+# ZERO warnings and simply come due.
+#
+# Simulated over a week through the real allocator: at 32 active items,
+# 7 items got no notification at all in their final 48 hours; with this
+# cap that halves to 4, at NO cost in volume (16 vs 17 pushes/week). It
+# only ever makes a near-deadline item louder, never a distant one, so
+# it cannot reintroduce the 333-pushes/week problem load scaling was
+# added to solve.
+#
+# Peter's completion behaviour does not substitute for this: simulated
+# at an 85% completion rate the misses persisted (6 at heavy load),
+# because the mechanism is interval stretch, not volume.
+DEFAULT_DEADLINE_GUARANTEE_FRACTION = 0.33
 
 
 # EVERY environment variable Cadence.from_env() reads, in one list.
@@ -237,6 +264,7 @@ TUNABLE_ENV_VARS = (
     "DAILY_NOTIFICATION_BUDGET",
     "MIN_INTERVAL_HOURS",
     "LOAD_SCALE_TARGET_ITEMS",
+    "DEADLINE_GUARANTEE_FRACTION",
 )
 
 
@@ -352,6 +380,7 @@ class Cadence:
     # it is a property of the current workload, not of configuration.
     load_scale: float = 1.0
     load_scale_target: int = DEFAULT_LOAD_SCALE_TARGET
+    deadline_guarantee: float = DEFAULT_DEADLINE_GUARANTEE_FRACTION
 
     @classmethod
     def from_env(cls) -> "Cadence":
@@ -459,6 +488,13 @@ class Cadence:
                 DEFAULT_LOAD_SCALE_TARGET,
                 "LOAD_SCALE_TARGET_ITEMS",
             ),
+            deadline_guarantee=_parse_float(
+                config.optional(
+                    "DEADLINE_GUARANTEE_FRACTION", str(DEFAULT_DEADLINE_GUARANTEE_FRACTION)
+                ),
+                DEFAULT_DEADLINE_GUARANTEE_FRACTION,
+                "DEADLINE_GUARANTEE_FRACTION",
+            ),
         )
 
     def for_load(self, active_items: int) -> "Cadence":
@@ -514,6 +550,20 @@ class Cadence:
         # Load scaling last, so a heavy workload stretches everything
         # uniformly rather than distorting the urgency ordering.
         hours *= self.load_scale
+
+        # THE DEADLINE GUARANTEE, applied after load scaling because load
+        # scaling is precisely what it has to defend against: at a heavy
+        # workload the scale could push an interval past the item's own
+        # deadline, so it came due having never been mentioned. Capping
+        # at a fraction of the time remaining guarantees a few reminders
+        # no matter how much else is on his plate.
+        #
+        # Only for items not yet due. An overdue item has no "time
+        # remaining" to take a fraction of, and overdue_decay above is
+        # deliberately backing it OFF -- clamping here would fight that.
+        if days_until > 0:
+            hours = min(hours, (days_until * 24) * self.deadline_guarantee)
+
         return max(hours, self.min_interval)
 
     def overdue_decay(self, days_until: float) -> float:

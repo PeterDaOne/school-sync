@@ -156,7 +156,11 @@ class CadenceFormula(unittest.TestCase):
         self.assertAlmostEqual(just_before, just_after)
 
     def test_task_alpha_differs_from_assignment(self):
-        self.assertAlmostEqual(CADENCE.interval_hours("Tasks", 2, "Medium", "x"), 40.0)
+        # UNCAPPED deliberately: this isolates the alpha, and the
+        # deadline guarantee would otherwise clamp a 2-days-out item to
+        # 1/3 of its remaining time. The cap has its own tests below.
+        uncapped = replace(CADENCE, deadline_guarantee=1.0)
+        self.assertAlmostEqual(uncapped.interval_hours("Tasks", 2, "Medium", "x"), 40.0)
 
     def test_min_interval_flattens_the_task_vs_assignment_floor(self):
         """
@@ -177,9 +181,74 @@ class CadenceFormula(unittest.TestCase):
         self.assertAlmostEqual(assignment, CADENCE.min_interval)
 
     def test_priority_still_multiplies_above_the_hard_floor(self):
-        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", 5, "High", "x"), 10.0)
-        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", 5, "Medium", "x"), 20.0)
-        self.assertAlmostEqual(CADENCE.interval_hours("Assignments", 5, "Low", "x"), 40.0)
+        # Uncapped for the same reason as the alpha test above: at 5 days
+        # out the deadline guarantee clamps to 39.6h, which would hide
+        # the Low multiplier.
+        c = replace(CADENCE, deadline_guarantee=1.0)
+        self.assertAlmostEqual(c.interval_hours("Assignments", 5, "High", "x"), 10.0)
+        self.assertAlmostEqual(c.interval_hours("Assignments", 5, "Medium", "x"), 20.0)
+        self.assertAlmostEqual(c.interval_hours("Assignments", 5, "Low", "x"), 40.0)
+
+
+class DeadlineGuarantee(unittest.TestCase):
+    """
+    An item's interval may never outrun its own deadline.
+
+    Added 2026-08-01 after simulating a real school load through the
+    engine: load scaling multiplies every interval by active_items/5, so
+    at 55 active items an assignment due in TWO DAYS was reminded every
+    73.8 hours -- longer than the 48 it had left. It could come due
+    having never been mentioned once.
+    """
+
+    def test_interval_cannot_exceed_the_fraction_of_time_remaining(self):
+        # 2 days out = 48h remaining; 1/3 of that is 15.84h.
+        self.assertAlmostEqual(
+            CADENCE.interval_hours("Tasks", 2, "Medium", "x"), 48 * 0.33
+        )
+
+    def test_it_survives_heavy_load_scaling(self):
+        """The case it exists for: load scaling must not silence an item."""
+        loaded = CADENCE.for_load(55)
+        self.assertGreater(loaded.load_scale, 10)
+        hours = loaded.interval_hours("Assignments", 2, "Medium", "x")
+        self.assertLessEqual(hours, 48, "an item due in 2 days must be reminded within 48h")
+
+    def test_it_guarantees_several_reminders_before_the_deadline(self):
+        for days in (1, 2, 5, 10):
+            hours = CADENCE.for_load(55).interval_hours("Assignments", days, "Medium", "x")
+            self.assertGreaterEqual(
+                (days * 24) / hours, 2.5, f"too few reminders {days} days out"
+            )
+
+    def test_it_never_makes_a_distant_item_louder(self):
+        """
+        It is a floor on attentiveness, not a new cadence: far from due,
+        the normal formula still governs, so this cannot reintroduce the
+        volume problem load scaling was added to solve.
+        """
+        far = CADENCE.interval_hours("Assignments", 30, "Medium", "x")
+        uncapped = replace(CADENCE, deadline_guarantee=1.0)
+        self.assertAlmostEqual(far, uncapped.interval_hours("Assignments", 30, "Medium", "x"))
+
+    def test_it_does_not_apply_to_overdue_items(self):
+        """
+        An overdue item has no "time remaining" to take a fraction of,
+        and overdue_decay is deliberately backing it OFF -- clamping here
+        would fight that.
+        """
+        capped = CADENCE.interval_hours("Assignments", -3, "Medium", "x")
+        uncapped = replace(CADENCE, deadline_guarantee=1.0)
+        self.assertAlmostEqual(
+            capped, uncapped.interval_hours("Assignments", -3, "Medium", "x")
+        )
+
+    def test_the_hard_floor_still_wins(self):
+        # Minutes from due, 1/3 of remaining time is tiny -- but nothing
+        # may notify twice inside MIN_INTERVAL_HOURS, by any path.
+        self.assertGreaterEqual(
+            CADENCE.interval_hours("Assignments", 0.01, "High", "x"), CADENCE.min_interval
+        )
 
     def test_hard_floor_collapses_high_and_medium_when_freshly_overdue(self):
         """
