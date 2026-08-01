@@ -35,7 +35,7 @@ what's already documented; do verify anything you're about to depend on.
 
 ## Where things actually stand
 
-Public repo: https://github.com/PeterDaOne/school-sync. **345 tests**,
+Public repo: https://github.com/PeterDaOne/school-sync. **359 tests**,
 green, gating CI. launchd loaded. Both capture layers proven end to end
 against real data; Classroom additionally proven running in the cloud.
 
@@ -63,9 +63,11 @@ missing things"):
 All five missed items were recovered and verified in Notion.
 
 **The classifier is now proven on real mail** — 6 for 6 on genuine
-messages, including relative dates ("tomorrow", "end of day today") and
-class resolution ("Physics" → "AP Physics"). That closes what this file
-previously listed as the biggest unproven thing.
+messages, including relative dates ("tomorrow", "end of day today"),
+class resolution ("Physics" → "AP Physics"), and (after the `For` change
+below) life categories: chore/birthday/tournament → `Personal`, with
+exactly one of `class_name`/`category` set every time. That closes what
+this file previously listed as the biggest unproven thing.
 
 ## What is NOT proven
 
@@ -89,16 +91,6 @@ previously listed as the biggest unproven thing.
 
 ## Open items
 
-- **`classmap.NON_CLASS_CATEGORIES`** still blocks automated capture from
-  selecting School/Personal/Friends/Work, so captured chores and personal
-  events land with `For` blank (4 of the 5 recovered items did). Peter
-  decided on 2026-07-31 to **let Claude choose the category explicitly
-  while keeping fuzzy course-name matching locked out** — the hazard was
-  always fuzzy matching, not explicit classification. **Not yet
-  implemented.** It needs a `category` field in the Gmail classifier
-  schema (enum: the four non-class options + null) and a resolver path
-  that accepts an exact category name from the model but still refuses
-  one inferred from a course name.
 - **An unexplained observation from 2026-07-30**, never resolved: one run
   reported "nothing to do" when a reminder was demonstrably due. Did not
   reproduce in 3 attempts; a Notion query-lag hypothesis was tested and
@@ -189,7 +181,21 @@ previously listed as the biggest unproven thing.
     re-export) and three `REMINDER_INTERVAL_HOURS*` settings left in
     `.env` from the pre-2026-07-29 tier system, which nothing had read
     for two days and which looked live.
-11. **Tests 307 → 345.**
+11. **`For` on captured items.** `classmap.resolve_category()` accepts a
+    life category (School/Personal/Friends/Work) that the classifier
+    named outright — exact match only, no fuzzy matching — while
+    `resolve()` keeps refusing those for course names. Disjoint
+    allow-lists, pinned by a test, so "a course name can never become
+    Personal" is structural rather than a fuzzy-threshold accident.
+    Verified 6/6 on real mail; four existing rows backfilled.
+12. **Gmail deep links: confirmed impossible, don't retry.**
+    `mail.google.com/.well-known/apple-app-site-association` is **404**,
+    so Gmail supports no iOS universal links and no https URL can open
+    the app. `classroom.google.com` DOES publish one claiming `*` with
+    35 exclusions that do not cover `/c/*/a/*/details` — so Classroom
+    Source Links already open the app on iOS and the web on desktop,
+    for free.
+13. **Tests 307 → 359.**
 
 ## Maintaining this file
 

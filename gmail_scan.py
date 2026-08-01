@@ -181,6 +181,24 @@ ASSIGNMENT_SCHEMA = {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "School class or course name if identifiable, otherwise null.",
         },
+        # Only consulted when class_name doesn't resolve to a real course.
+        # Enum'd to the live non-class options so the model cannot invent
+        # a category -- and it is validated again on the way out, because
+        # Notion silently creates any select option it is handed.
+        "category": {
+            "anyOf": [
+                {"type": "string", "enum": sorted(classmap.NON_CLASS_CATEGORIES)},
+                {"type": "null"},
+            ],
+            "description": (
+                "What this is for, when it is NOT tied to a school course. "
+                "School = general school business not tied to one class. "
+                "Personal = own life, errands, appointments, family. "
+                "Friends = something with or for friends. "
+                "Work = a job or shift. Null if class_name is set, or if "
+                "none of these clearly fits."
+            ),
+        },
         "due_date": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": (
@@ -190,7 +208,9 @@ ASSIGNMENT_SCHEMA = {
             ),
         },
     },
-    "required": ["is_actionable", "item_type", "task_name", "class_name", "due_date"],
+    "required": [
+        "is_actionable", "item_type", "task_name", "class_name", "category", "due_date",
+    ],
     "additionalProperties": False,
 }
 
@@ -222,8 +242,21 @@ When capturing, classify item_type:
   Tasks       - anything else he must do: chores, errands, forms, replies
   Events      - something he must show up to at a particular time
 
-Set class_name ONLY for a school class or course. Leave it null for \
-chores, errands, and anything not tied to a course.\
+Then say what it is FOR, using exactly one of two fields:
+
+  class_name - ONLY for a school class or course ("AP Lang", "Physics"). \
+Leave null for anything not tied to a course.
+  category   - ONLY when class_name is null. One of:
+                 School   - school business not tied to one class \
+(forms, fees, picture day, counselor meetings)
+                 Personal - his own life: chores, errands, appointments, \
+family, hobbies
+                 Friends  - something with or for friends
+                 Work     - a job or a shift
+
+Never set both. If it is schoolwork, set class_name and leave category \
+null. If neither clearly fits, leave both null -- a blank field is easy \
+to fix and a wrong one is not.\
 """
 
 
@@ -503,10 +536,17 @@ def run(known_ids: set[str] | None = None):
             item_type = _item_type(parsed, type_options)
             notion_client.create_item(
                 name=parsed["task_name"],
-                # Claude can invent a class name that isn't one of Peter's
-                # Notion options, and Notion would happily create it. Resolve
-                # against the real options or leave it blank.
-                category=classmap.resolve(parsed.get("class_name"), category_options),
+                # A course name goes through the fuzzy matcher, which can
+                # never return a life category; a life category the model
+                # named outright goes through an exact-match-only check,
+                # which can never be reached by a course name. Both
+                # filter against the live Notion options, because Notion
+                # happily CREATES any select option it is handed.
+                # See shared/classmap.py for why the two are separate.
+                category=(
+                    classmap.resolve(parsed.get("class_name"), category_options)
+                    or classmap.resolve_category(parsed.get("category"), category_options)
+                ),
                 due_date=parsed.get("due_date"),
                 source="Email",
                 type_name=item_type,

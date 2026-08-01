@@ -197,5 +197,76 @@ class NonClassCategoriesAreNeverAutoSelected(unittest.TestCase):
         self.assertIsNone(classmap.resolve("AP Stats", ["School", "Personal"]))
 
 
+class ExplicitCategoryFromTheClassifier(unittest.TestCase):
+    """
+    resolve_category is the OTHER half of the 2026-07-31 split: a
+    classifier may name a life category outright, because that is not the
+    mechanism the blanket ban was defending against.
+
+    The property that must survive is the one the ban existed for: a
+    COURSE NAME still cannot reach a life category. These two functions
+    have deliberately disjoint allow-lists.
+    """
+
+    def c(self, name):
+        return classmap.resolve_category(name, CATEGORY_OPTIONS)
+
+    def test_an_exact_category_is_accepted(self):
+        for name in ("School", "Personal", "Friends", "Work"):
+            self.assertEqual(self.c(name), name)
+
+    def test_surrounding_whitespace_is_tolerated(self):
+        self.assertEqual(self.c("  Personal "), "Personal")
+
+    def test_a_course_name_is_refused_even_if_it_contains_a_category(self):
+        """
+        The exact hazard the original ban existed for. Fuzzy matching is
+        what filed real homework under a life category; this function
+        does none, so "Personal Finance" is simply not a category.
+        """
+        for name in ("Personal Finance", "Work Experience", "School of Rock",
+                     "Friends Seminar", "Personal Fitness", "Work Study"):
+            self.assertIsNone(self.c(name), name)
+
+    def test_a_real_class_name_is_refused(self):
+        # Classes go through resolve(); the two allow-lists are disjoint.
+        self.assertIsNone(self.c("AP Stats"))
+        self.assertIsNone(self.c("AP Lang"))
+
+    def test_an_invented_category_is_refused(self):
+        # Notion silently CREATES any select option it is handed, so an
+        # unrecognised value must never reach create_item.
+        self.assertIsNone(self.c("Business"))
+        self.assertIsNone(self.c("Family"))
+
+    def test_case_must_match_the_live_option_exactly(self):
+        # Notion matches select options on exact string; "personal" would
+        # create a second, lowercase option next to the real one.
+        self.assertIsNone(self.c("personal"))
+
+    def test_a_category_missing_from_the_live_options_is_refused(self):
+        """If Peter deletes or renames the option, we must not re-create it."""
+        self.assertIsNone(classmap.resolve_category("Work", ["AP Lang", "Personal"]))
+
+    def test_none_and_empty_are_refused(self):
+        self.assertIsNone(self.c(None))
+        self.assertIsNone(self.c(""))
+
+    def test_the_two_resolvers_have_disjoint_ranges(self):
+        """
+        The invariant, stated directly: nothing resolve() can return is
+        something resolve_category() can return, and vice versa. This is
+        what makes "a course name can never become Personal" structural
+        rather than a property of the current fuzzy thresholds.
+        """
+        for name in CATEGORY_OPTIONS:
+            by_course = classmap.resolve(name, CATEGORY_OPTIONS)
+            by_category = classmap.resolve_category(name, CATEGORY_OPTIONS)
+            self.assertFalse(
+                by_course is not None and by_category is not None,
+                f"{name!r} is reachable through both resolvers",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -156,6 +156,43 @@ def resolve(course_name: str | None, options: list[str]) -> str | None:
 # UI, it belongs here too, or capture may start matching against it.
 NON_CLASS_CATEGORIES = frozenset({"School", "Personal", "Friends", "Work"})
 
+
+def resolve_category(name: str | None, options: list[str]) -> str | None:
+    """
+    A non-class category (`School` / `Personal` / `Friends` / `Work`)
+    that a CLASSIFIER named outright, or None.
+
+    Deliberately the opposite of resolve(): that one fuzzy-matches course
+    names and refuses to return a life category; this one accepts ONLY an
+    exact life-category name and never fuzzy-matches anything.
+
+    The split is the whole point (Peter's call, 2026-07-31). The original
+    rule — automated capture may never choose a life category — was
+    written when the only mechanism was fuzzy-matching a Classroom course
+    name, where "Personal Finance" scoring against "Personal" would file
+    real homework under a life category, silently and permanently.
+
+    Claude naming a category outright is a different mechanism with a
+    different risk. It is not guessing from a course title; it is reading
+    an email and saying what the thing is for. The blanket ban cost real
+    accuracy — of the five items recovered on 2026-07-31, four (a chore,
+    a birthday, a tournament, a porch to sweep) landed with `For` blank
+    because there was no way to express "Personal".
+
+    So the hazard is fenced where it actually lives: exact match only,
+    only against NON_CLASS_CATEGORIES, and still filtered through the
+    live Notion options so a category Peter has since renamed or deleted
+    can never be re-created (Notion silently CREATES any select option it
+    is handed). A course name cannot reach this function's allow-list,
+    and a category cannot reach resolve()'s.
+    """
+    if not name:
+        return None
+    candidate = name.strip()
+    if candidate not in NON_CLASS_CATEGORIES:
+        return None
+    return candidate if candidate in options else None
+
 # Keyed by the LIVE Notion option name, not a corrected spelling — Notion
 # matches on exact string, so "AP Psycology" (verified via curl 2026-07-30)
 # has to be the key until Peter renames the option itself. If he does,

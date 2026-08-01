@@ -25,6 +25,7 @@ from googleapiclient.errors import HttpError
 import tests.context  # noqa: F401
 
 import gmail_scan
+from shared import classmap
 
 
 class FakeHttpResponse:
@@ -409,6 +410,43 @@ class Run(unittest.TestCase):
         svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
         self._run(svc, [{**ASSIGNMENT, "class_name": "Personal Finance"}])
         self.assertIsNone(self.created[0]["category"])
+
+    def test_an_explicit_life_category_is_used_when_there_is_no_class(self):
+        """
+        Added 2026-07-31. Before this, a chore captured from a family
+        member landed with `For` blank -- 4 of the 5 items recovered that
+        day did -- because the classifier had no way to say "Personal".
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [{**ASSIGNMENT, "class_name": None, "category": "Personal"}])
+        self.assertEqual(self.created[0]["category"], "Personal")
+
+    def test_a_class_wins_over_a_category_when_both_are_somehow_set(self):
+        # The prompt says never set both; this pins what happens anyway.
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [{**ASSIGNMENT, "class_name": "AP Lang", "category": "Personal"}])
+        self.assertEqual(self.created[0]["category"], "AP Lang")
+
+    def test_a_course_name_in_the_category_field_is_still_refused(self):
+        """
+        The safety property the old blanket ban existed for, now enforced
+        by resolve_category's exact-match-only allow-list rather than by
+        forbidding the categories outright.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [{**ASSIGNMENT, "class_name": None, "category": "Personal Finance"}])
+        self.assertIsNone(self.created[0]["category"])
+
+    def test_an_invented_category_leaves_the_field_blank(self):
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [{**ASSIGNMENT, "class_name": None, "category": "Business"}])
+        self.assertIsNone(self.created[0]["category"])
+
+    def test_the_schema_only_offers_the_real_life_categories(self):
+        prop = gmail_scan.ASSIGNMENT_SCHEMA["properties"]["category"]
+        enum = next(b["enum"] for b in prop["anyOf"] if "enum" in b)
+        self.assertEqual(set(enum), set(classmap.NON_CLASS_CATEGORIES))
+        self.assertIn("category", gmail_scan.ASSIGNMENT_SCHEMA["required"])
 
     def test_an_already_captured_message_is_skipped_before_any_claude_call(self):
         svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
