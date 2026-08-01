@@ -141,6 +141,13 @@ this file previously listed as the biggest unproven thing.
   and reload only once verified.
 - If you touch real Notion data to test, restore it — EXCEPT "Do dishes",
   "Pray", and "Assinment type shi", which are known junk items.
+- **Never run `gmail_scan.run()` by hand while the cloud dispatcher is
+  live.** Capture dedup assumes ONE capture runner. Production honours
+  that (`local_sync.py` references the sweeps zero times; the workflow's
+  `concurrency` group serializes cloud runs) but a manual sweep is a
+  second runner with no guard — the cloud can fetch the still-unlabelled
+  message and build its dedup index before your run finishes, producing
+  duplicate rows. Pause the dispatcher first, or expect to dedup by hand.
 - **Run `python3 scan_secrets.py` before any push.** The repo is public.
 - Ask Peter on genuine judgment calls with real tradeoffs; make small
   implementation decisions yourself.
@@ -213,7 +220,10 @@ this file previously listed as the biggest unproven thing.
     individually correct due dates from 3 synthetic multi-item emails,
     and the bump recovered a REAL lost task from Peter's own mail
     ("Test max pushups" — dropped from the physics email under the old
-    policy, nobody had noticed).
+    policy, nobody had noticed). **Proven end to end AND in the cloud:**
+    from a clean slate the sweep reported `classified 1 message(s),
+    added 2 item(s)` — two rows from one email in a single pass — and a
+    cloud dispatch independently did the same on the same message.
 14. **Tests 307 → 410.** New files: `test_settings_parity.py`, `test_calendar_client.py` (which had ZERO coverage despite `_event_times` encoding Google's exclusive all-day end date), `test_generate_plist.py`.
 
 ## Maintaining this file
