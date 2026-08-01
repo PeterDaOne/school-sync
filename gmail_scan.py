@@ -64,6 +64,7 @@ Sonnet rather than Opus: this is a cheap yes/no on two short strings,
 run once per candidate email, so cost per call is the whole ballgame.
 """
 
+import base64
 import json
 import sys
 from urllib.parse import quote
@@ -97,7 +98,13 @@ GMAIL_SCOPES = [
 # it, so every previously-rejected message gets exactly one fresh look
 # under the new policy. Cost is bounded by the window and by
 # MAX_CLASSIFICATIONS_PER_RUN; the alternative is silent permanent loss.
-SEEN_LABEL = "school-sync/seen-v2"
+# v3 (2026-08-01): multi-item extraction. Every message seen under the
+# one-item-per-email policy deserves a fresh look, because any of them
+# could have carried a second assignment that was merged away or dropped.
+# Cheap in practice -- a message whose items are already captured is
+# skipped by External ID before any Claude call (see _item_external_id
+# for why the first item keeps the bare `gmail:<id>` form).
+SEEN_LABEL = "school-sync/seen-v3"
 
 # Machine-generated bulk mail, excluded before Claude is ever called.
 # Gmail's own tab classifier is free and is very good at precisely the
@@ -115,6 +122,12 @@ EXCLUDED_CATEGORIES = ("promotions", "social", "forums")
 MODEL = "claude-sonnet-5"
 MAX_TOKENS = 1000
 MAX_MESSAGES_PER_RUN = 20
+
+# How much of an email body to send. Long threads are mostly quoted
+# history and the ask is near the top, so this bounds cost without
+# losing much -- and the previous behaviour was ~200 characters of
+# Gmail snippet, so this is already a large improvement.
+MAX_BODY_CHARS = 4000
 
 # Hard ceiling on Claude calls per run, independent of the label logic.
 # If dedup ever breaks again, this caps the damage at a knowable number
@@ -148,34 +161,51 @@ ITEM_TYPES = ["Assignments", "Tasks", "Events"]
 # shared/reminders.py.
 DEFAULT_ITEM_TYPE = "Tasks"
 
-# Structured outputs guarantee the response parses — no markdown fences
-# to strip, no malformed JSON to catch.
-ASSIGNMENT_SCHEMA = {
+# Hard ceiling on rows one email may create. A pathological digest must
+# not turn into fifty Notion pages and fifty phone notifications.
+MAX_ITEMS_PER_EMAIL = 10
+
+# ONE EMAIL CAN CARRY SEVERAL THINGS TO DO, so this extracts a LIST.
+#
+# It used to be a single object with one task_name, which silently lost
+# data in two different ways depending on the model's mood (measured live
+# 2026-08-01 on three realistic multi-item emails):
+#
+#   MERGE  "Complete rhetorical analysis essay draft; read Gatsby ch.5-7;
+#          study for vocab quiz" as ONE item with ONE due date -- so two
+#          of the three nagged from the wrong date, the whole thing went
+#          overdue while most of it wasn't, and finishing the essay could
+#          not be checked off without marking the reading and quiz done
+#          too, since Status is per item.
+#   DROP   A physics email listing a problem set, a lab report and a test
+#          produced only the problem set. The other two vanished with no
+#          trace -- and the message is labelled seen, so they could never
+#          be reconsidered.
+#
+# An EMPTY list is how "nothing here to do" is expressed. That replaced a
+# separate is_actionable boolean, which was redundant with it and gave
+# the model two ways to say no.
+ITEM_SCHEMA = {
     "type": "object",
     "properties": {
-        "is_actionable": {
-            "type": "boolean",
-            "description": (
-                "True only if a real person or Peter's school is asking Peter to "
-                "personally do something. False for marketing, promotions, "
-                "newsletters, receipts, and automated notifications."
-            ),
-        },
         # anyOf rather than a ["string", "null"] type-union array: the
         # structured-outputs spec documents anyOf as supported and does not
         # list type unions. Confirmed working on a live call 2026-07-31.
         "item_type": {
-            "anyOf": [{"type": "string", "enum": ITEM_TYPES}, {"type": "null"}],
+            "type": "string",
+            "enum": ITEM_TYPES,
             "description": (
                 "Assignments = schoolwork to produce or study for. "
                 "Tasks = anything else to do (chores, errands, forms, replies). "
-                "Events = something to show up to at a particular time. "
-                "Null if is_actionable is false."
+                "Events = something to show up to at a particular time."
             ),
         },
         "task_name": {
-            "anyOf": [{"type": "string"}, {"type": "null"}],
-            "description": "Short imperative name, or null if is_actionable is false.",
+            "type": "string",
+            "description": (
+                "Short imperative name for THIS ONE thing. Do not combine "
+                "several tasks into one name -- list them separately instead."
+            ),
         },
         "class_name": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
@@ -202,15 +232,38 @@ ASSIGNMENT_SCHEMA = {
         "due_date": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": (
-                "Due date as YYYY-MM-DD, resolved against the current date given "
-                "in the message. Resolve relative dates like 'Thursday', 'next "
-                "Friday' or 'tomorrow'. Null only if no date is stated or implied."
+                "Due date for THIS ONE item as YYYY-MM-DD, resolved against the "
+                "current date given in the message. Resolve relative dates like "
+                "'Thursday', 'next Friday' or 'tomorrow'. Items in the same email "
+                "usually have DIFFERENT due dates -- give each its own. Null only "
+                "if no date is stated or implied."
             ),
         },
     },
-    "required": [
-        "is_actionable", "item_type", "task_name", "class_name", "category", "due_date",
-    ],
+    "required": ["item_type", "task_name", "class_name", "category", "due_date"],
+    "additionalProperties": False,
+}
+
+EXTRACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        # NO `maxItems` HERE. The API rejects it outright:
+        #   400 output_config.format.schema: For 'array' type, property
+        #   'maxItems' is not supported
+        # (verified live 2026-08-01 -- it was in the first draft and the
+        # first real call failed). The cap is enforced in _extract_items
+        # instead, which is where it belongs anyway: the things being
+        # protected are Notion rows and phone notifications, not tokens.
+        "items": {
+            "type": "array",
+            "items": ITEM_SCHEMA,
+            "description": (
+                "Every distinct thing Peter personally has to do, one entry each. "
+                "Empty if the email asks nothing of him."
+            ),
+        }
+    },
+    "required": ["items"],
     "additionalProperties": False,
 }
 
@@ -218,8 +271,17 @@ ASSIGNMENT_SCHEMA = {
 # because the hard part isn't the output shape -- it's the corporate-CTA
 # vs real-request distinction, which needs examples to land.
 CLASSIFIER_SYSTEM = """\
-You triage one email from a high school student's inbox and decide \
-whether it describes something he personally has to DO.
+You read one email from a high school student's inbox and list \
+EVERYTHING he personally has to DO. One email often contains several \
+separate things; return one entry per thing, each with its own due date.
+
+Return an EMPTY list if the email asks nothing of him.
+
+LIST SEPARATELY, never combine. An email saying "essay draft due Monday, \
+read chapters 5-7 by Wednesday, vocab quiz Friday" is THREE entries with \
+three different due dates -- not one entry named "essay, reading and \
+quiz". He checks these off one at a time, and a combined entry cannot be \
+half-finished.
 
 CAPTURE when a real person is asking him to do something, or when his \
 school is telling him work is owed. Examples: homework, an essay, a \
@@ -234,15 +296,15 @@ deadlines, not obligations. The question is whether a specific human, \
 or his school, is asking HIM for something. A company addressing all \
 its customers at once is not.
 
-If the sender is automated or promotional, answer false even when the \
-subject contains words like assignment, project, due, or test.
+If the sender is automated or promotional, return an empty list even \
+when the subject contains words like assignment, project, due, or test.
 
-When capturing, classify item_type:
+For each entry, classify item_type:
   Assignments - schoolwork he must produce or study for
   Tasks       - anything else he must do: chores, errands, forms, replies
   Events      - something he must show up to at a particular time
 
-Then say what it is FOR, using exactly one of two fields:
+For EACH entry, say what it is FOR, using exactly one of two fields:
 
   class_name - ONLY for a school class or course ("AP Lang", "Physics"). \
 Leave null for anything not tied to a course.
@@ -377,6 +439,24 @@ def _message_link(message_id: str, address: str | None) -> str:
     return f"https://mail.google.com/mail/u/0/#all/{message_id}"
 
 
+def _item_external_id(message_id: str, index: int) -> str:
+    """
+    Dedup key for one item extracted from one email.
+
+    The FIRST item keeps the bare `gmail:<id>` form, deliberately: that
+    is what every row captured before multi-item extraction carries, and
+    changing it would make all of them look uncaptured. Later items get
+    `gmail:<id>#2`, `#3`, ... so each row still dedups independently.
+
+    That backward compatibility is load-bearing rather than tidy. The
+    seen-label had to be bumped for this policy change, which re-opens
+    every previously-seen message for one fresh look -- so without the
+    bare first ID, every already-captured email would have been captured
+    a second time the moment this shipped.
+    """
+    return f"gmail:{message_id}" if index == 0 else f"gmail:{message_id}#{index + 1}"
+
+
 def _mark_seen(service, message_id: str, label_id: str | None):
     if not label_id:
         return
@@ -390,10 +470,48 @@ def _mark_seen(service, message_id: str, label_id: str | None):
         print(f"[gmail_scan] could not label {message_id}: {e}", file=sys.stderr)
 
 
-def _classify_email(client, subject: str, sender: str, snippet: str) -> dict | None:
+def _message_text(msg: dict) -> str:
     """
-    One lightweight Claude call: is this something Peter has to do, and
-    if so, what kind of thing is it?
+    The readable body of a Gmail message, decoded and length-capped.
+
+    Falls back to the snippet, which is what this used to send EXCLUSIVELY
+    -- the fetch asked for format="metadata", so the model only ever saw
+    Gmail's ~200-character preview. Peter's own test mails are shorter
+    than that, so it looked fine; a teacher's five-assignment digest would
+    have had everything past the first sentence or two simply invisible,
+    which made the multi-item loss above much likelier in real use than in
+    testing.
+
+    text/plain is preferred over text/html because stripping tags well is
+    its own problem, and virtually every mail client sends both.
+    """
+    def walk(part):
+        mime = part.get("mimeType", "")
+        body = part.get("body", {})
+        data = body.get("data")
+        if data and mime == "text/plain":
+            yield base64.urlsafe_b64decode(data).decode("utf-8", "replace")
+        for sub in part.get("parts", []) or []:
+            yield from walk(sub)
+
+    payload = msg.get("payload", {}) or {}
+    text = "\n".join(walk(payload)).strip()
+    if not text:
+        # Either an HTML-only mail or an unexpected structure. The snippet
+        # is worse but never wrong, so degrade rather than skip the mail.
+        text = msg.get("snippet", "") or ""
+    # Long threads are mostly quoted history; the ask is near the top, and
+    # sending 50KB per message would cost real money for no accuracy.
+    return text[:MAX_BODY_CHARS]
+
+
+def _extract_items(client, subject: str, sender: str, body: str) -> list[dict]:
+    """
+    One Claude call: everything in this email that Peter has to do.
+
+    Returns a LIST, empty when the email asks nothing of him. It used to
+    return one optional item, which silently merged or dropped the extras
+    of any multi-item email -- see EXTRACTION_SCHEMA.
 
     The sender is included because it carries most of the signal for the
     distinction that matters -- a person's address reads very differently
@@ -410,26 +528,34 @@ def _classify_email(client, subject: str, sender: str, snippet: str) -> dict | N
     today = timeutil.now()
     prompt = (
         f"Today is {today:%A, %B %-d, %Y}.\n\n"
-        f"From: {sender}\nSubject: {subject}\nSnippet: {snippet}"
+        f"From: {sender}\nSubject: {subject}\n\n{body}"
     )
     resp = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=CLASSIFIER_SYSTEM,
-        output_config={"format": {"type": "json_schema", "schema": ASSIGNMENT_SCHEMA}},
+        output_config={"format": {"type": "json_schema", "schema": EXTRACTION_SCHEMA}},
         messages=[{"role": "user", "content": prompt}],
     )
     if resp.stop_reason == "refusal":
         print(f"[gmail_scan] classification refused for {subject!r}", file=sys.stderr)
-        return None
+        return []
 
     text = next((b.text for b in resp.content if b.type == "text"), None)
     if not text:
-        return None
+        return []
     data = json.loads(text)  # schema-constrained, so this is safe
-    if not data.get("is_actionable") or not data.get("task_name"):
-        return None
-    return data
+    items = data.get("items") or []
+    # maxItems is in the schema, but Notion rows and phone notifications
+    # are the things being protected here, so the cap is enforced where
+    # it actually matters rather than trusted upstream.
+    kept = [i for i in items if i.get("task_name")][:MAX_ITEMS_PER_EMAIL]
+    if len(items) > len(kept):
+        print(
+            f"[gmail_scan] {subject!r} yielded {len(items)} items; keeping {len(kept)}",
+            file=sys.stderr,
+        )
+    return kept
 
 
 def _item_type(parsed: dict, options: list[str]) -> str:
@@ -488,8 +614,21 @@ def run(known_ids: set[str] | None = None):
     failures: list[str] = []
 
     for msg_ref in messages:
-        external_id = f"gmail:{msg_ref['id']}"
-        if external_id in known_ids:
+        # Whole-message skip, ONLY on the degraded no-label path.
+        #
+        # When labelling works, the label already excludes a processed
+        # message from the query, so this check almost never fires -- and
+        # when it does fire it is precisely the case we must NOT skip: a
+        # label version bump deliberately re-opens old messages so their
+        # extras can be recovered under the new policy. Skipping them on
+        # the base External ID would make the bump accomplish nothing,
+        # which is the same "a filter outlives the policy that wrote it"
+        # mistake the versioned label exists to fix.
+        #
+        # Without the label there is no query-level dedup at all, every
+        # run re-examines the (narrowed) window, and this is the only
+        # thing stopping repeat spend. So it stays, conditionally.
+        if not label_id and f"gmail:{msg_ref['id']}" in known_ids:
             skipped += 1
             continue
         if classified >= MAX_CLASSIFICATIONS_PER_RUN:
@@ -505,27 +644,27 @@ def run(known_ids: set[str] | None = None):
         # the rest of the sweep. Re-raised at the end so the run still
         # goes red.
         try:
+            # format="full" (not "metadata") so the model sees the actual
+            # email. See _message_text -- metadata gave it Gmail's
+            # ~200-character snippet and nothing else.
             msg = (
                 service.users()
                 .messages()
-                .get(
-                    userId="me",
-                    id=msg_ref["id"],
-                    format="metadata",
-                    metadataHeaders=["Subject", "From"],
-                )
+                .get(userId="me", id=msg_ref["id"], format="full")
                 .execute()
             )
-            headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
-            parsed = _classify_email(
+            headers = {
+                h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])
+            }
+            items = _extract_items(
                 client,
                 headers.get("Subject", ""),
                 headers.get("From", ""),
-                msg.get("snippet", ""),
+                _message_text(msg),
             )
             classified += 1
 
-            if not parsed:
+            if not items:
                 # A REJECTION is labelled immediately. Nothing was
                 # created, so there is nothing to lose -- and not paying
                 # to recompute a "no" is the entire reason the label
@@ -533,48 +672,64 @@ def run(known_ids: set[str] | None = None):
                 _mark_seen(service, msg_ref["id"], label_id)
                 continue
 
-            item_type = _item_type(parsed, type_options)
-            notion_client.create_item(
-                name=parsed["task_name"],
-                # A course name goes through the fuzzy matcher, which can
-                # never return a life category; a life category the model
-                # named outright goes through an exact-match-only check,
-                # which can never be reached by a course name. Both
-                # filter against the live Notion options, because Notion
-                # happily CREATES any select option it is handed.
-                # See shared/classmap.py for why the two are separate.
-                category=(
-                    classmap.resolve(parsed.get("class_name"), category_options)
-                    or classmap.resolve_category(parsed.get("category"), category_options)
-                ),
-                due_date=parsed.get("due_date"),
-                source="Email",
-                type_name=item_type,
-                external_id=external_id,
-                # item_type, not a hardcoded "Assignments": it decides the
-                # verb (Events -> Attend) and, more importantly, the whole
-                # reminder cadence.
-                task_type=tasktype.resolve(
-                    parsed["task_name"], item_type, task_type_options
-                ),
-                priority=tasktype.priority(parsed["task_name"], priority_options),
-                # One click from the Notion page back to the email this
-                # was inferred from. Worth more here than for Classroom:
-                # Gmail items are parsed out of prose, so checking the
-                # original is how Peter confirms a captured item is right.
-                source_link=_message_link(msg_ref["id"], mailbox),
-            )
-            known_ids.add(external_id)  # guard against duplicates within this run
-            added += 1
+            link = _message_link(msg_ref["id"], mailbox)
+            for index, parsed in enumerate(items):
+                item_external_id = _item_external_id(msg_ref["id"], index)
+                if item_external_id in known_ids:
+                    skipped += 1
+                    continue
+                item_type = _item_type(parsed, type_options)
+                notion_client.create_item(
+                    name=parsed["task_name"],
+                    # A course name goes through the fuzzy matcher, which
+                    # can never return a life category; a life category the
+                    # model named outright goes through an exact-match-only
+                    # check, which can never be reached by a course name.
+                    # Both filter against the live Notion options, because
+                    # Notion happily CREATES any select option it is handed.
+                    # See shared/classmap.py for why the two are separate.
+                    category=(
+                        classmap.resolve(parsed.get("class_name"), category_options)
+                        or classmap.resolve_category(
+                            parsed.get("category"), category_options
+                        )
+                    ),
+                    due_date=parsed.get("due_date"),
+                    source="Email",
+                    type_name=item_type,
+                    external_id=item_external_id,
+                    # item_type, not a hardcoded "Assignments": it decides
+                    # the verb (Events -> Attend) and, more importantly, the
+                    # whole reminder cadence.
+                    task_type=tasktype.resolve(
+                        parsed["task_name"], item_type, task_type_options
+                    ),
+                    priority=tasktype.priority(parsed["task_name"], priority_options),
+                    # One click from the Notion page back to the email this
+                    # was inferred from. Worth more here than for Classroom:
+                    # Gmail items are parsed out of prose, so checking the
+                    # original is how Peter confirms a captured item is
+                    # right. Every item from one email shares the link.
+                    source_link=link,
+                )
+                known_ids.add(item_external_id)  # no duplicates within this run
+                added += 1
 
-            # An ACCEPTANCE is labelled only after the item exists.
+            # An ACCEPTANCE is labelled only after the items exist.
             # Labelling before the create meant a create that threw --
             # a malformed due_date from Claude gets a 400 from Notion --
-            # left the message labelled `school-sync/seen`, so the next
-            # run's `-label:` clause excluded it forever while no Notion
-            # item existed. The assignment was silently lost. Now a
-            # failed create costs one extra classification next run
-            # instead of the item.
+            # left the message labelled seen, so the next run's `-label:`
+            # clause excluded it forever while no Notion item existed. The
+            # assignment was silently lost. Now a failed create costs one
+            # extra classification next run instead of the item.
+            #
+            # Reaching this line means every item in the loop above either
+            # was created or was already known: the loop has no inner
+            # try, so a create that throws jumps straight to the outer
+            # handler and never labels. That is what makes partial failure
+            # recover correctly -- the message stays unlabelled and is
+            # retried, and whichever items did land are skipped next time
+            # by their own External IDs.
             _mark_seen(service, msg_ref["id"], label_id)
         except Exception as e:
             failures.append(f"{msg_ref['id']}: {e}")
@@ -583,7 +738,7 @@ def run(known_ids: set[str] | None = None):
 
     if added or skipped or classified:
         print(
-            f"[gmail_scan] classified {classified}, added {added} item(s), "
+            f"[gmail_scan] classified {classified} message(s), added {added} item(s), "
             f"skipped {skipped} already captured"
         )
 

@@ -17,6 +17,7 @@ request from a corporate call to action is verified against live mail,
 not here.
 """
 
+import base64
 import unittest
 from unittest import mock
 
@@ -50,10 +51,11 @@ class FakeGmail:
     """Mimics the users().labels()/messages() chains gmail_scan walks."""
 
     def __init__(self, labels=None, messages=None, bodies=None, label_error=None,
-                 address="peter@example.com", profile_error=None):
+                 address="peter@example.com", profile_error=None, texts=None):
         self._labels = list(labels or [])
         self._messages = list(messages or [])
         self._bodies = bodies or {}
+        self._texts = texts or {}
         self._label_error = label_error
         self._address = address
         self._profile_error = profile_error
@@ -102,13 +104,21 @@ class _Messages:
 
     def get(self, userId=None, id=None, format=None, metadataHeaders=None):
         subject, snippet = self.p._bodies.get(id, ("A Subject", "A snippet"))
+        body = self.p._texts.get(id, snippet)
+        # format="full" shape: headers plus a base64url text/plain body.
+        # The sweep asks for this so the model sees the real email rather
+        # than Gmail's ~200-char snippet.
         return _Exec(
             {
                 "payload": {
                     "headers": [
                         {"name": "Subject", "value": subject},
                         {"name": "From", "value": "Someone <someone@example.com>"},
-                    ]
+                    ],
+                    "mimeType": "text/plain",
+                    "body": {
+                        "data": base64.urlsafe_b64encode(body.encode()).decode()
+                    },
                 },
                 "snippet": snippet,
             }
@@ -192,6 +202,98 @@ class CandidateQuery(unittest.TestCase):
             q = gmail_scan._candidate_query(has_label=False)
         self.assertIn(gmail_scan.LOOKBACK_WITHOUT_LABEL, q)
         self.assertNotIn("-label:", q)
+
+
+class ExtractionSchema(unittest.TestCase):
+    def test_the_schema_does_not_use_maxItems(self):
+        """
+        REGRESSION GUARD, found by a live call rather than a test. The
+        API rejects it outright:
+
+          400 output_config.format.schema: For 'array' type, property
+          'maxItems' is not supported
+
+        The first draft had it and the first real request 400'd. The cap
+        lives in _extract_items instead, which is the right place anyway
+        -- what needs protecting is Notion rows and phone notifications.
+        """
+        self.assertNotIn("maxItems", gmail_scan.EXTRACTION_SCHEMA["properties"]["items"])
+
+    def test_the_top_level_is_a_list_not_a_single_item(self):
+        self.assertEqual(
+            gmail_scan.EXTRACTION_SCHEMA["properties"]["items"]["type"], "array"
+        )
+
+    def test_there_is_no_is_actionable_flag(self):
+        # An empty list already says "nothing to do"; a separate boolean
+        # gave the model two ways to express the same answer.
+        self.assertNotIn("is_actionable", gmail_scan.ITEM_SCHEMA["properties"])
+
+
+class MessageText(unittest.TestCase):
+    """
+    The body the classifier actually receives. This used to be Gmail's
+    ~200-char snippet, because the fetch asked for format="metadata".
+    """
+
+    def msg(self, parts=None, body_text=None, snippet="a snippet", mime="text/plain"):
+        payload = {"mimeType": mime, "headers": []}
+        if body_text is not None:
+            payload["body"] = {
+                "data": base64.urlsafe_b64encode(body_text.encode()).decode()
+            }
+        if parts:
+            payload["parts"] = parts
+        return {"payload": payload, "snippet": snippet}
+
+    def part(self, mime, text):
+        return {
+            "mimeType": mime,
+            "body": {"data": base64.urlsafe_b64encode(text.encode()).decode()},
+        }
+
+    def test_decodes_a_simple_plain_text_body(self):
+        self.assertEqual(gmail_scan._message_text(self.msg(body_text="hello")), "hello")
+
+    def test_prefers_plain_text_over_html_in_a_multipart_message(self):
+        m = self.msg(
+            mime="multipart/alternative",
+            parts=[self.part("text/plain", "plain version"),
+                   self.part("text/html", "<p>html version</p>")],
+        )
+        self.assertEqual(gmail_scan._message_text(m), "plain version")
+
+    def test_finds_text_nested_several_levels_down(self):
+        inner = {"mimeType": "multipart/alternative",
+                 "parts": [self.part("text/plain", "deep text")]}
+        m = self.msg(mime="multipart/mixed", parts=[inner])
+        self.assertEqual(gmail_scan._message_text(m), "deep text")
+
+    def test_falls_back_to_the_snippet_for_html_only_mail(self):
+        m = self.msg(mime="text/html", snippet="fallback snippet")
+        self.assertEqual(gmail_scan._message_text(m), "fallback snippet")
+
+    def test_is_length_capped(self):
+        m = self.msg(body_text="x" * 99999)
+        self.assertEqual(len(gmail_scan._message_text(m)), gmail_scan.MAX_BODY_CHARS)
+
+    def test_handles_a_message_with_no_payload_at_all(self):
+        self.assertEqual(gmail_scan._message_text({"snippet": "s"}), "s")
+
+
+class ItemExternalIds(unittest.TestCase):
+    def test_the_first_item_uses_the_bare_message_id(self):
+        # Backward compatibility with every row captured before
+        # multi-item extraction -- see _item_external_id.
+        self.assertEqual(gmail_scan._item_external_id("abc", 0), "gmail:abc")
+
+    def test_later_items_are_suffixed_from_two(self):
+        self.assertEqual(gmail_scan._item_external_id("abc", 1), "gmail:abc#2")
+        self.assertEqual(gmail_scan._item_external_id("abc", 2), "gmail:abc#3")
+
+    def test_ids_are_unique_across_a_whole_email(self):
+        ids = [gmail_scan._item_external_id("abc", i) for i in range(10)]
+        self.assertEqual(len(set(ids)), 10)
 
 
 class SeenLabelVersioning(unittest.TestCase):
@@ -329,9 +431,18 @@ class Run(unittest.TestCase):
         self.created.append(kwargs)
 
     def _run(self, svc, verdicts, known_ids=None):
-        answers = list(verdicts)
+        """
+        `verdicts` is one answer per message. Each may be a single item
+        dict (the common case), a LIST of item dicts (a multi-item
+        email), or None for "nothing to do" -- all normalised to the list
+        _extract_items really returns.
+        """
+        answers = [
+            [] if v is None else ([v] if isinstance(v, dict) else list(v))
+            for v in verdicts
+        ]
         with mock.patch.object(gmail_scan, "_gmail_service", return_value=svc), mock.patch.object(
-            gmail_scan, "_classify_email", side_effect=lambda *a, **k: answers.pop(0)
+            gmail_scan, "_extract_items", side_effect=lambda *a, **k: answers.pop(0)
         ):
             gmail_scan.run(known_ids=known_ids)
 
@@ -443,16 +554,131 @@ class Run(unittest.TestCase):
         self.assertIsNone(self.created[0]["category"])
 
     def test_the_schema_only_offers_the_real_life_categories(self):
-        prop = gmail_scan.ASSIGNMENT_SCHEMA["properties"]["category"]
+        prop = gmail_scan.ITEM_SCHEMA["properties"]["category"]
         enum = next(b["enum"] for b in prop["anyOf"] if "enum" in b)
         self.assertEqual(set(enum), set(classmap.NON_CLASS_CATEGORIES))
-        self.assertIn("category", gmail_scan.ASSIGNMENT_SCHEMA["required"])
+        self.assertIn("category", gmail_scan.ITEM_SCHEMA["required"])
 
-    def test_an_already_captured_message_is_skipped_before_any_claude_call(self):
+    def test_one_email_can_produce_several_items(self):
+        """
+        The 2026-08-01 fix. A single object schema forced the model to
+        compress a multi-assignment email, and it did so two different
+        ways depending on its mood: merge everything into one row with
+        one due date, or drop the extras entirely and silently.
+        """
         svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[
+            {**ASSIGNMENT, "task_name": "Essay draft", "due_date": "2026-08-04"},
+            {**ASSIGNMENT, "task_name": "Read Gatsby ch 5-7", "due_date": "2026-08-06"},
+            {**ASSIGNMENT, "task_name": "Vocab quiz", "due_date": "2026-08-08"},
+        ]])
+        self.assertEqual(
+            [c["name"] for c in self.created],
+            ["Essay draft", "Read Gatsby ch 5-7", "Vocab quiz"],
+        )
+
+    def test_each_item_keeps_its_own_due_date(self):
+        """
+        The point of splitting. Merged into one row they all inherited
+        the earliest date, so two of three nagged from the wrong day and
+        the row went overdue while most of it wasn't.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[
+            {**ASSIGNMENT, "task_name": "A", "due_date": "2026-08-04"},
+            {**ASSIGNMENT, "task_name": "B", "due_date": "2026-08-08"},
+        ]])
+        self.assertEqual(
+            [c["due_date"] for c in self.created], ["2026-08-04", "2026-08-08"]
+        )
+
+    def test_the_first_item_keeps_the_bare_external_id(self):
+        """
+        BACKWARD COMPATIBILITY, and it is load-bearing. Every row captured
+        before multi-item extraction carries `gmail:<id>`. The seen-label
+        had to be bumped for this policy change, which re-opens every
+        previously-seen message -- so if the first item used a new ID
+        form, every already-captured email would be captured again.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[
+            {**ASSIGNMENT, "task_name": "A"}, {**ASSIGNMENT, "task_name": "B"},
+        ]])
+        self.assertEqual(
+            [c["external_id"] for c in self.created], ["gmail:m1", "gmail:m1#2"]
+        )
+
+    def test_a_previously_captured_email_is_not_recaptured_after_the_label_bump(self):
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[ASSIGNMENT]], known_ids={"gmail:m1"})
+        self.assertEqual(self.created, [])
+
+    def test_extra_items_are_still_added_when_the_first_is_known(self):
+        """
+        The recovery path: an email captured under the old one-item
+        policy gets its extras added without duplicating item one.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[
+            {**ASSIGNMENT, "task_name": "already have this"},
+            {**ASSIGNMENT, "task_name": "the one that was lost"},
+        ]], known_ids={"gmail:m1"})
+        self.assertEqual([c["name"] for c in self.created], ["the one that was lost"])
+        self.assertEqual(self.created[0]["external_id"], "gmail:m1#2")
+
+    def test_every_item_from_one_email_shares_the_source_link(self):
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[
+            {**ASSIGNMENT, "task_name": "A"}, {**ASSIGNMENT, "task_name": "B"},
+        ]])
+        links = {c["source_link"] for c in self.created}
+        self.assertEqual(len(links), 1)
+        self.assertIn("#all/m1", links.pop())
+
+    def test_items_can_have_different_types_and_categories(self):
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[
+            {**ASSIGNMENT, "task_name": "Essay", "item_type": "Assignments",
+             "class_name": "AP Lang", "category": None},
+            {**ASSIGNMENT, "task_name": "Mow lawn", "item_type": "Tasks",
+             "class_name": None, "category": "Personal"},
+        ]])
+        self.assertEqual([c["type_name"] for c in self.created], ["Assignments", "Tasks"])
+        self.assertEqual([c["category"] for c in self.created], ["AP Lang", "Personal"])
+
+    def test_an_empty_list_creates_nothing_but_still_labels(self):
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[]])
+        self.assertEqual(self.created, [])
+        self.assertEqual(svc.modified, ["m1"])
+
+    def test_without_the_label_a_captured_message_is_skipped_before_any_claude_call(self):
+        """
+        The degraded no-label path has no query-level dedup, so every run
+        re-examines the (narrowed) window and this base-ID check is the
+        only thing bounding repeat spend.
+        """
+        svc = FakeGmail(messages=["m1"], label_error=http_error(403))
         self._run(svc, [], known_ids={"gmail:m1"})
         self.assertEqual(self.created, [])
-        self.assertEqual(svc.modified, [])  # not even labelled: nothing was examined
+        self.assertEqual(svc.modified, [])  # not even labelled: nothing examined
+
+    def test_with_the_label_a_captured_message_is_still_examined(self):
+        """
+        Deliberately NOT skipped on the base External ID when labelling
+        works. The label already keeps processed mail out of the query,
+        so this only fires after a label VERSION BUMP -- which exists
+        precisely to re-open old messages so extras merged or dropped
+        under a previous policy can be recovered. Skipping here would
+        make every future bump a no-op, the same "filter outlives its
+        policy" failure the versioning was introduced to fix.
+
+        Nothing is duplicated: the per-item External ID catches item one.
+        """
+        svc = FakeGmail(labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}], messages=["m1"])
+        self._run(svc, [[ASSIGNMENT]], known_ids={"gmail:m1"})
+        self.assertEqual(self.created, [])       # item 1 already known
+        self.assertEqual(svc.modified, ["m1"])   # but it WAS looked at
 
     def test_a_rejected_message_is_still_labelled_seen(self):
         """
@@ -590,10 +816,33 @@ class Run(unittest.TestCase):
         seen = {}
         with mock.patch.object(gmail_scan, "_gmail_service", return_value=svc), \
              mock.patch.object(
-                 gmail_scan, "_classify_email",
-                 side_effect=lambda c, subj, sender, snip: seen.update(sender=sender) or ASSIGNMENT):
+                 gmail_scan, "_extract_items",
+                 side_effect=lambda c, subj, sender, body: seen.update(
+                     sender=sender, body=body) or [ASSIGNMENT]):
             gmail_scan.run(known_ids=set())
         self.assertIn("someone@example.com", seen["sender"])
+
+    def test_the_real_body_is_passed_not_just_the_snippet(self):
+        """
+        The fetch used to be format="metadata", so the model saw Gmail's
+        ~200-char preview and nothing else. A teacher's multi-assignment
+        digest had everything past the first sentence invisible.
+        """
+        body = "Essay due Monday. Read chapters 5-7 by Wednesday. Quiz Friday."
+        svc = FakeGmail(
+            labels=[{"id": "L1", "name": gmail_scan.SEEN_LABEL}],
+            messages=["m1"],
+            bodies={"m1": ("Week of Aug 4", "Essay due Monday. Read chapt")},
+            texts={"m1": body},
+        )
+        seen = {}
+        with mock.patch.object(gmail_scan, "_gmail_service", return_value=svc), \
+             mock.patch.object(
+                 gmail_scan, "_extract_items",
+                 side_effect=lambda c, subj, sender, b: seen.update(body=b) or [ASSIGNMENT]):
+            gmail_scan.run(known_ids=set())
+        self.assertEqual(seen["body"], body)
+        self.assertIn("Quiz Friday", seen["body"])
 
     def test_without_the_modify_scope_the_sweep_still_runs(self):
         svc = FakeGmail(label_error=http_error(403), messages=["m1"])

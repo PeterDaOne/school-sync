@@ -35,7 +35,7 @@ what's already documented; do verify anything you're about to depend on.
 
 ## Where things actually stand
 
-Public repo: https://github.com/PeterDaOne/school-sync. **388 tests**,
+Public repo: https://github.com/PeterDaOne/school-sync. **410 tests**,
 green, gating CI. launchd loaded. **Both capture layers are now proven
 end to end AND proven running in the cloud** — Classroom on 2026-07-31,
 Gmail on 2026-08-01 (row `Count 1 to 10` created inside dispatch run
@@ -87,9 +87,10 @@ this file previously listed as the biggest unproven thing.
   pinned by tests and the `authuser=` form is deliberate (`u/0` means
   "first signed-in account", which breaks once school + personal are both
   signed in). Whether it actually opens the message needs a human tap.
-- **Real teacher mail at volume.** Still untested: forwarded threads,
-  digests carrying several assignments, mail mentioning a deadline
-  without setting one.
+- **Real teacher mail at volume.** Still untested: forwarded threads and
+  mail mentioning a deadline without setting one. (Multi-item digests
+  are handled as of 2026-08-01 — see below — but only synthetic ones
+  have been tested; a real teacher's formatting is still unproven.)
 - **The classifier is non-deterministic.** The same email came back
   `Events` once and `Tasks` once across two runs. Both readings were
   defensible, but don't assume a verdict is stable.
@@ -200,7 +201,20 @@ this file previously listed as the biggest unproven thing.
     35 exclusions that do not cover `/c/*/a/*/details` — so Classroom
     Source Links already open the app on iOS and the web on desktop,
     for free.
-13. **Tests 307 → 388.** New files: `test_settings_parity.py`, `test_calendar_client.py` (which had ZERO coverage despite `_event_times` encoding Google's exclusive all-day end date), `test_generate_plist.py`.
+13. **Multi-item extraction (2026-08-01).** One email used to produce at
+    most one row; extras were silently merged (one row, one wrong due
+    date) or dropped, non-deterministically. Now `EXTRACTION_SCHEMA`
+    returns a list, the classifier reads the real body (`format="full"`
+    + `_message_text`; it used to see only the ~200-char snippet), and
+    items get per-item External IDs (`gmail:<id>`, `gmail:<id>#2`, ...
+    — the bare first form is load-bearing backward compatibility).
+    Label bumped to `seen-v3`. **The API rejects `maxItems` on arrays**
+    (400, found live); the cap is code-side. Verified: 9/9 items with
+    individually correct due dates from 3 synthetic multi-item emails,
+    and the bump recovered a REAL lost task from Peter's own mail
+    ("Test max pushups" — dropped from the physics email under the old
+    policy, nobody had noticed).
+14. **Tests 307 → 410.** New files: `test_settings_parity.py`, `test_calendar_client.py` (which had ZERO coverage despite `_event_times` encoding Google's exclusive all-day end date), `test_generate_plist.py`.
 
 ## Maintaining this file
 
