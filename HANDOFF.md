@@ -36,8 +36,20 @@ what's already documented; do verify anything you're about to depend on.
 ## Where things actually stand
 
 Public repo: https://github.com/PeterDaOne/school-sync. **388 tests**,
-green, gating CI. launchd loaded. Both capture layers proven end to end
-against real data; Classroom additionally proven running in the cloud.
+green, gating CI. launchd loaded. **Both capture layers are now proven
+end to end AND proven running in the cloud** — Classroom on 2026-07-31,
+Gmail on 2026-08-01 (row `Count 1 to 10` created inside dispatch run
+#710's 48-second window; `local_sync.py` imports only `config, log,
+pipeline` and cannot capture, so nothing else could have made it). That
+Gmail proof doubles as proof `ANTHROPIC_API_KEY` is set as a GitHub
+secret, which earlier notes called permanently unknowable — it stopped
+being unknowable when the subject-keyword filter was removed.
+
+**The external dispatcher runs every 2 minutes** (raised from 5 on
+2026-08-01). Measured: consecutive run numbers, no gaps, ~48s per run,
+so nothing queues behind the `concurrency` group. Capture latency is
+bounded by this interval, not by `CLOUD_REMINDER_LAG_MINUTES` — captured
+items carry an External ID and skip the lag.
 
 **Capture, notification and the Gmail pre-filter were all repaired on
 2026-07-31.** Three separate bugs, one reported symptom ("capture is
@@ -71,17 +83,6 @@ this file previously listed as the biggest unproven thing.
 
 ## What is NOT proven
 
-- **Gmail capture has never run in the cloud.** Every real call so far
-  has been local. Peter believes `ANTHROPIC_API_KEY` is set as a GitHub
-  secret (2026-07-31) but that has not been confirmed. **It is now cheap
-  to confirm, which it previously was not:** removing the subject-keyword
-  filter and adding consumer domains to `SCHOOL_EMAIL_HINTS` means the
-  cloud sweep finds real candidates, so send an email to the account,
-  wait ~5 minutes, and check for a Notion row with `Input Type = Email`.
-  `local_sync.py` cannot capture anything, so a row that appears was
-  created by GitHub Actions. That also settles "has Gmail capture ever
-  run in the cloud" in the same test. Older notes calling this
-  permanently unverifiable describe the pre-2026-07-31 filter.
 - **The Gmail `Source Link` has not been clicked.** The URL shape is
   pinned by tests and the `authuser=` form is deliberate (`u/0` means
   "first signed-in account", which breaks once school + personal are both
