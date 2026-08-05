@@ -129,6 +129,17 @@ jobs:
           DEADLINE_GUARANTEE_FRACTION: ${{ vars.DEADLINE_GUARANTEE_FRACTION || '0.33' }}
           # The hard floor: nothing notifies twice inside this window.
           MIN_INTERVAL_HOURS: ${{ vars.MIN_INTERVAL_HOURS || '2.0' }}
+          # CLASS HOURS. Reminders that come due while Peter is in class
+          # are DEFERRED until school ends -- the opposite disposition
+          # from quiet hours, which consume the slot. See
+          # shared/reminders.py. These must match the Mac exactly for the
+          # same reason every other knob here does.
+          SCHOOL_HOURS_START: ${{ vars.SCHOOL_HOURS_START || '07:30' }}
+          SCHOOL_HOURS_END: ${{ vars.SCHOOL_HOURS_END || '15:00' }}
+          SCHOOL_DAYS: ${{ vars.SCHOOL_DAYS || 'Mon-Fri' }}
+          # More than this many new items announced in one pass collapse
+          # into a single grouped push. See shared/digest.py.
+          CAPTURE_DIGEST_THRESHOLD: ${{ vars.CAPTURE_DIGEST_THRESHOLD || '3' }}
           EVENT_REMINDER_HOUR: ${{ vars.EVENT_REMINDER_HOUR || '07:00' }}
           # Calendar days before an Event to remind. 3,1,0 is the
           # original cadence -- prep runway is the paired Assignment's
@@ -136,5 +147,14 @@ jobs:
           EVENT_REMINDER_DAYS: ${{ vars.EVENT_REMINDER_DAYS || '3,1,0' }}
           CLOUD_REMINDERS: ${{ vars.CLOUD_REMINDERS || 'true' }}
           CLOUD_REMINDER_LAG_MINUTES: ${{ vars.CLOUD_REMINDER_LAG_MINUTES || '5' }}
-          CLASSROOM_LOOKBACK_HOURS: ${{ vars.CLASSROOM_LOOKBACK_HOURS || '48' }}
+          # 168 = 7 days, matching classroom_scan.DEFAULT_LOOKBACK_HOURS
+          # and .env.example. This said '48' from 2026-07-29 to
+          # 2026-08-05, silently overriding a widening that was made,
+          # documented and tested everywhere EXCEPT the one file that
+          # runs -- classroom_scan is cloud-only, so this line is the
+          # live value and the code default never applied. Read the
+          # number as "how long can the cloud be broken before
+          # assignments start disappearing", because anything posted
+          # outside the window is lost permanently and silently.
+          CLASSROOM_LOOKBACK_HOURS: ${{ vars.CLASSROOM_LOOKBACK_HOURS || '168' }}
         run: python cloud_sync.py

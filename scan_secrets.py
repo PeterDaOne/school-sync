@@ -57,21 +57,15 @@ GENERIC_DOMAINS = {
 
 # Keys whose VALUES must never appear in a tracked file. Everything else
 # in .env is a non-secret setting -- see the module docstring.
-SENSITIVE_KEYS = (
-    "NOTION_TOKEN",
-    "NOTION_DB_ID",
-    "GOOGLE_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET",
-    "GOOGLE_REFRESH_TOKEN",
-    "GOOGLE_CALENDAR_ID",
-    "ANTHROPIC_API_KEY",
-    "NTFY_TOPIC",
-    "NTFY_COMMAND_TOPIC",
-    "SCHOOL_EMAIL_HINTS",  # PII, not a credential -- see docstring.
-)
+#
+# Defined in shared/config.py, not here, because it grew a second
+# consumer on 2026-08-05: notify.publish_failure redacts the same values
+# before posting error text to an unauthenticated ntfy topic. Two copies
+# of a denylist is one copy that gets updated.
+SENSITIVE_KEYS = config.SENSITIVE_KEYS
 
 # Too short to be a meaningful match; would produce noise.
-MIN_VALUE_LENGTH = 8
+MIN_VALUE_LENGTH = config.MIN_SECRET_LENGTH
 
 
 def tracked_files() -> list[str]:

@@ -43,7 +43,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from shared import config, log, notion_client, pipeline, reminders
+from shared import config, log, notify, notion_client, pipeline, reminders
 
 import classroom_scan
 import gmail_scan
@@ -118,7 +118,23 @@ def main() -> int:
 
     for failure in failures:
         print(f"[{SOURCE}] FAILED: {failure}", file=sys.stderr)
-    return 1 if failures else exit_code
+
+    code = 1 if failures else exit_code
+    if code:
+        # Report somewhere readable without a GitHub login. Job logs need
+        # admin auth even on a public repo, so a red run is currently a
+        # dead end for anyone not signed in -- seven of them between
+        # 2026-08-03 and 2026-08-05 could not be diagnosed from outside.
+        # Best effort, rate-limited, and never allowed to raise: this
+        # must not turn a diagnosable failure into two failures.
+        try:
+            notify.publish_failure(
+                "\n".join(failures)
+                or f"sync pass exited {exit_code} (see the run log)"
+            )
+        except Exception as e:
+            print(f"[{SOURCE}] failure report itself failed: {e}", file=sys.stderr)
+    return code
 
 
 if __name__ == "__main__":

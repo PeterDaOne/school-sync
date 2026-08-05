@@ -332,6 +332,70 @@ if this ever bites twice.
   the API and need no review.
 - **Everything else:** happens without you.
 
+### When the system stays quiet, and why
+
+Three different silences, worded differently in `sync.log` on purpose —
+a silence whose cause you can't read off the log is how a real 3h20m
+notification outage once hid for 137 consecutive passes.
+
+| Window | Default | What happens | Log says |
+|---|---|---|---|
+| Quiet hours | 00:00–05:00 | Slot is **consumed**. Nothing is pushed and the item waits a full interval. | `N silenced by quiet hours` |
+| Class hours | 07:30–15:00, Mon–Fri | Reminder is **deferred**. `Last Reminded` untouched; it is reconsidered after the bell. | `N reminder(s) held until school ends (class hours)` |
+| Daily budget | 10 nags/day | Deferred until midnight. | `N reminder(s) held until tomorrow (nag budget…)` |
+| Per-pass cap | 3 | Deferred to the next pass, a minute or two later. | `N reminder(s) deferred to next pass` |
+
+**The quiet/class asymmetry is deliberate.** Nothing changes while you're
+asleep, and holding overnight reminders produced a documented burst of
+three pushes at 05:00:48/:49/:50 — so quiet hours spend the slot. During
+class the opposite is true: 15:00 is strictly better than 09:00 for the
+same message and the item's remaining time is materially unchanged, so
+deferring loses nothing and delivering to a bag loses everything.
+
+**New-item announcements still get through during class if they're
+urgent** (already overdue, or due today). An assignment posted second
+period and due at 6pm is news you can still act on; a syllabus due in
+three weeks waits for the bell.
+
+### Bulk imports arrive as one notification
+
+More than `CAPTURE_DIGEST_THRESHOLD` (3) new items announced in a single
+pass collapse into one grouped push:
+
+```
+📝 32 new assignments
+AP Lang (4) · AP Physics (4) · AP Pre-Calc (4) · … · +2 more
+```
+
+Tapping it opens the Notion database. Announcements are exempt from the
+daily budget — correct, since an item is captured exactly once — but on
+day one of a semester eight teachers post at once, and the only other
+bound is the per-pass cap against a two-minute dispatcher. Measured
+through the real allocator: **32 new items produced 32 pushes over 20
+minutes before this, and 1 push after.**
+
+Nothing is dropped or held to tomorrow: every digested item is announced
+and stamped. The cost is that a digest carries no per-item due date and
+no **Mark done** button, which is exactly why the threshold exists — at
+1–3 new items you keep both.
+
+### When a cloud run goes red
+
+GitHub job logs need admin auth (the REST API returns 403 anonymously
+even on a public repo), so a failed run used to be diagnosable by nobody.
+`cloud_sync` now publishes the reason to an ntfy **ops topic** —
+`NTFY_ERROR_TOPIC`, or `<NTFY_COMMAND_TOPIC>-ops` if that isn't set, so
+it needs no new secret. Read it with:
+
+```bash
+curl -s "https://ntfy.sh/$NTFY_COMMAND_TOPIC-ops/json?poll=1&since=24h"
+```
+
+Rate-limited to one report an hour, published at minimum priority so it
+never buzzes, and every value in `SENSITIVE_KEYS` is redacted before it
+leaves the process — exception text is not safe by default, since
+`notion_client` deliberately surfaces Notion's 4xx response bodies.
+
 ---
 
 ## Tests
@@ -441,3 +505,26 @@ Key ideas worth knowing before you change anything:
 - ntfy tags are **not** invisible metadata: a tag matching an emoji
   short code is rendered as an emoji and prepended to the title. Adding
   a decorative tag changes how every notification looks.
+- **A digest push has no Mark-done button and no per-item due date.** One
+  button cannot close N items. Below `CAPTURE_DIGEST_THRESHOLD` you get
+  individual pushes and keep both.
+- **`MIN_INTERVAL_HOURS` silently overrides the deadline guarantee inside
+  ~6 hours of a due date.** `DEADLINE_GUARANTEE_FRACTION` (0.33) only
+  binds above `MIN_INTERVAL_HOURS / 0.33` = 6.06 hours remaining; below
+  that the 2-hour floor wins, so an item captured at 20:00 and due at
+  23:59 gets two reminders, not the ~3 the guarantee implies. The final
+  hours before a deadline are exactly where the guarantee was meant to
+  matter most, and exactly where it cannot fire.
+- **`TASK_FLOOR_HOURS` (1.0) is inert**, for the same reason: it sits
+  below `MIN_INTERVAL_HOURS` (2.0), which clamps last. Tuning it does
+  nothing. Likewise High and Medium priority are identical for a freshly
+  overdue item — both clamp to the same floor. Priority still bites
+  further out.
+- **A moved deadline does not propagate.** Classroom capture is
+  create-only: once an item carries an External ID the sweep skips it, so
+  a teacher pushing Friday's essay to Monday leaves Notion, Calendar and
+  every reminder still pointing at Friday.
+- **Nothing notices when a Classroom item is turned in.** Submission
+  state is read (to avoid importing already-submitted work) but never
+  re-checked afterwards, so an assignment you handed in at 23:40 still
+  nags at 07:00 until you set Status → Done by hand.

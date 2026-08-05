@@ -51,7 +51,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-from . import calendar_client, commands, notion_client, reminders, state, timeutil
+from . import calendar_client, commands, digest, notion_client, reminders, state, timeutil
 from .notify import build_mark_done_action, notify
 
 
@@ -78,6 +78,15 @@ class Report:
     # 3h20m outage on 2026-07-31 looked exactly like healthy throttling
     # in sync.log — 137 consecutive passes of it.
     budget_blocked: bool = False
+    # True when the deferral is CLASS HOURS — held until school ends, a
+    # third distinct duration alongside "next pass" (a minute) and
+    # "tomorrow" (midnight). Same rule as budget_blocked and for the same
+    # reason: a log line that cannot distinguish the causes of a silence
+    # is what made a real outage invisible for 137 consecutive passes.
+    class_blocked: bool = False
+    # New items announced together in ONE digest push this pass, rather
+    # than one push each. See shared/digest.py.
+    digested: int = 0
     # Mark-done commands (from the notification action button, see
     # shared/commands.py) successfully applied this pass.
     commands_applied: int = 0
@@ -104,18 +113,28 @@ class Report:
             parts.append(f"synced {self.synced} item(s)")
         if self.reminded:
             parts.append(f"sent {self.reminded} reminder(s)")
+        if self.digested:
+            parts.append(f"announced {self.digested} new item(s) in 1 digest")
         if self.deferred:
-            parts.append(
+            # Three genuinely different waits, worded differently on
+            # purpose: a minute, until school ends, or until midnight.
+            if self.class_blocked:
+                parts.append(
+                    f"{self.deferred} reminder(s) held until school ends "
+                    f"(class hours)"
+                )
+            elif self.budget_blocked:
                 # Says "nag budget" because that is what it governs:
                 # capture announcements are exempt, so sent_today can
                 # legitimately exceed the cap on a day with a lot of new
                 # items. Reporting it as "15/6" read like a violation.
-                f"{self.deferred} reminder(s) held until tomorrow "
-                f"(nag budget of {self.daily_budget} spent; "
-                f"{self.sent_today} notification(s) sent today)"
-                if self.budget_blocked
-                else f"{self.deferred} reminder(s) deferred to next pass"
-            )
+                parts.append(
+                    f"{self.deferred} reminder(s) held until tomorrow "
+                    f"(nag budget of {self.daily_budget} spent; "
+                    f"{self.sent_today} notification(s) sent today)"
+                )
+            else:
+                parts.append(f"{self.deferred} reminder(s) deferred to next pass")
         if self.suppressed:
             parts.append(f"{self.suppressed} silenced by quiet hours")
         if self.commands_applied:
@@ -271,7 +290,14 @@ def run_sync_pass(
             report.failures.append(f"reminder failed for {item['name']!r}: {e}")
             traceback.print_exc(file=sys.stderr)
 
-    for item, reminder in _allocate(candidates, reminded_today, cadence, report, sent_today):
+    allocation = _allocate(
+        candidates, reminded_today, cadence, report, sent_today, now=now
+    )
+
+    if allocation.digest is not None:
+        _send_digest(allocation, report, recheck_before_send)
+
+    for item, reminder in allocation.sends:
         try:
             if not _should_send(item, reminder, recheck_before_send):
                 continue
@@ -307,6 +333,56 @@ def run_sync_pass(
     return report
 
 
+def _send_digest(allocation: "Allocation", report: "Report", recheck: bool):
+    """
+    Send the one grouped announcement and stamp every item it names.
+
+    ALL-OR-NOTHING ON THE RECHECK, deliberately. A digest is a single
+    push, so it cannot be partially claimed the way individual sends can:
+    if the other runner has already announced any member, this pass drops
+    the digest entirely rather than sending one that double-announces.
+    Nothing is lost — the unclaimed members still have Last Reminded
+    unset, so they are re-allocated on the next pass (minus the claimed
+    one), at most a couple of minutes later.
+
+    The stamp is per item and individually guarded: a failure partway
+    through must leave the rest stamped, because the push has already
+    landed and re-announcing those would be a duplicate. That is the
+    reverse of the usual "don't stamp unless it landed" rule for exactly
+    that reason.
+    """
+    try:
+        if recheck and not all(
+            _should_send(item, allocation.digest, True)
+            for item in allocation.digest_items
+        ):
+            return
+        if not notify(
+            allocation.digest.title,
+            allocation.digest.body,
+            # The database, not a page: a digest names several items and
+            # has no single page to open. No Mark-done action either —
+            # one button cannot close N items.
+            click_url=notion_client.database_url(),
+            priority=allocation.digest.priority,
+            tags=allocation.digest.tags,
+        ):
+            report.notify_failures += 1
+            return
+    except Exception as e:
+        report.failures.append(f"digest announcement failed: {e}")
+        traceback.print_exc(file=sys.stderr)
+        return
+
+    for item in allocation.digest_items:
+        try:
+            notion_client.mark_reminded(item["id"], timeutil.utc_now_iso(), 1)
+            report.digested += 1
+        except Exception as e:
+            report.failures.append(f"digest stamp failed for {item['name']!r}: {e}")
+            traceback.print_exc(file=sys.stderr)
+
+
 def _urgency(item: dict, reminder: "reminders.Reminder") -> tuple:
     """
     Sort key, most urgent first. ntfy priority is the primary signal
@@ -318,13 +394,30 @@ def _urgency(item: dict, reminder: "reminders.Reminder") -> tuple:
     return (-reminder.priority, due.timestamp() if due else float("inf"), rank)
 
 
+@dataclass
+class Allocation:
+    """
+    What this pass will actually deliver.
+
+    Two channels rather than one list, because a digest is one push
+    covering many items: `sends` is the usual one-push-per-item stream,
+    and `digest` (with `digest_items`) is a single push whose successful
+    delivery stamps every item it names.
+    """
+
+    sends: list[tuple[dict, "reminders.Reminder"]] = field(default_factory=list)
+    digest_items: list[dict] = field(default_factory=list)
+    digest: "reminders.Reminder | None" = None
+
+
 def _allocate(
     candidates: list[tuple[dict, "reminders.Reminder"]],
     reminded_today: set[str],
     cadence: "reminders.Cadence",
     report: "Report",
     sent_today: int = 0,
-) -> list[tuple[dict, "reminders.Reminder"]]:
+    now=None,
+) -> "Allocation":
     """
     Decide which of this pass's due reminders actually get sent.
 
@@ -375,27 +468,83 @@ def _allocate(
     Nothing is dropped, only DEFERRED: Last Reminded is untouched for
     anything not sent, so it is reconsidered next pass (and tomorrow, on
     a fresh budget).
+
+    CLASS HOURS (added 2026-08-05)
+    ------------------------------
+    While Peter is in class, nags are deferred wholesale and
+    announcements are deferred UNLESS they are genuinely urgent (ntfy
+    priority >= 4, i.e. the item is overdue or due today). A syllabus due
+    in three weeks waits for 15:00; an assignment posted second period
+    and due at 6pm still reaches him while he can act on it.
+
+    Deferral rather than consumption is deliberate — see
+    reminders.DEFAULT_SCHOOL_HOURS_START for why this is the opposite
+    disposition from quiet hours.
+
+    THE DIGEST (added 2026-08-05)
+    -----------------------------
+    Above cadence.capture_digest_threshold announcements in one pass,
+    they collapse into a single grouped push (shared/digest.py) rather
+    than one each. Every item is still announced and still stamped; the
+    only thing that changes is how many times the phone buzzes.
     """
     ordered = sorted(candidates, key=lambda c: _urgency(*c))
 
-    announcements = [c for c in ordered if c[1].kind == "capture"]
-    nags = [c for c in ordered if c[1].kind != "capture"]
+    in_class = now is not None and cadence.in_class_hours(now)
+    if in_class:
+        # Keep only announcements he could actually act on today. Note
+        # this filter runs BEFORE the digest is built, so a held batch
+        # is digested at 15:00 rather than announced piecemeal now.
+        eligible = [c for c in ordered if c[1].kind == "capture" and c[1].priority >= 4]
+    else:
+        eligible = ordered
 
-    # Exempt from the daily budget; bounded only by the per-pass cap.
-    sending = announcements[: cadence.max_per_pass]
+    announcements = [c for c in eligible if c[1].kind == "capture"]
+    nags = [c for c in eligible if c[1].kind != "capture"]
+
+    allocation = Allocation()
+
+    # Exempt from the daily budget; bounded only by the per-pass cap —
+    # unless there are enough of them to be worth digesting, in which
+    # case ALL of them go out together in one push.
+    summary = digest.build(announcements, cadence.capture_digest_threshold)
+    if summary is not None:
+        allocation.digest = summary
+        allocation.digest_items = [item for item, _ in announcements]
+        sending: list[tuple[dict, "reminders.Reminder"]] = []
+        # The digest counts against the nag budget by ITEM, not by push.
+        # Announcements consuming nag budget is the existing rule (a day
+        # full of real news should not also carry the usual nagging), and
+        # the information load is what that rule is really about — one
+        # buzz carrying twenty-five new assignments is still
+        # twenty-five new assignments to absorb.
+        announced = len(allocation.digest_items)
+        slots_used = 1
+    else:
+        sending = announcements[: cadence.max_per_pass]
+        announced = len(sending)
+        slots_used = len(sending)
 
     # Whatever is left of both the daily budget and this pass's cap.
-    room = max(0, cadence.daily_budget - sent_today - len(sending))
-    slots_left = max(0, cadence.max_per_pass - len(sending))
+    room = max(0, cadence.daily_budget - sent_today - announced)
+    slots_left = max(0, cadence.max_per_pass - slots_used)
     first_time = [c for c in nags if c[0]["id"] not in reminded_today]
     repeats = [c for c in nags if c[0]["id"] in reminded_today]
     sending += (first_time + repeats)[: min(room, slots_left)]
+    allocation.sends = sending
 
-    report.deferred += len(candidates) - len(sending)
-    # Distinguish "come back in a minute" from "come back tomorrow".
-    if report.deferred and room == 0:
-        report.budget_blocked = True
-    return sending
+    delivered = len(sending) + len(allocation.digest_items)
+    report.deferred += len(candidates) - delivered
+    # Distinguish "come back in a minute" from "come back after school"
+    # from "come back tomorrow". Class hours are reported first because
+    # they are the outer gate: during class the budget is not what is
+    # holding anything.
+    if report.deferred:
+        if in_class and len(eligible) < len(ordered):
+            report.class_blocked = True
+        elif room == 0:
+            report.budget_blocked = True
+    return allocation
 
 
 def finish(report: Report, source: str) -> int:

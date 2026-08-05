@@ -146,6 +146,19 @@ def _request(method: str, path: str, idempotent: bool = True, **kwargs):
     )
 
 
+def database_url() -> str:
+    """
+    A notion.so URL for the database itself.
+
+    Used as the click target for a digest announcement, which names
+    several items and so has no single page to open. Notion accepts the
+    bare dashless id as a path, and notion.so is a registered universal
+    link, so this hands off to the app on the phone exactly as a page URL
+    does.
+    """
+    return f"https://www.notion.so/{_database_id().replace('-', '')}"
+
+
 def get_all_items() -> list[dict]:
     """Pull every row from the school database, following pagination."""
     items: list[dict] = []

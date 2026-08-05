@@ -17,7 +17,7 @@ An earlier version quoted `SCHOOL_EMAIL_HINTS` in full, which named
 Peter's actual school — PII about a minor, published. `scan_secrets.py`
 now catches that; run it before pushing.
 
-Last updated: 2026-07-31, on commit `c69d945` + the session below.
+Last updated: 2026-08-05, on commit `5c5bf51` + the session below.
 Working tree state and test count change often — confirm with
 `git log --oneline origin/main..HEAD`, `git status`, and
 `python3 -m unittest discover -s tests -t .` rather than trusting this
@@ -35,7 +35,7 @@ what's already documented; do verify anything you're about to depend on.
 
 ## Where things actually stand
 
-Public repo: https://github.com/PeterDaOne/school-sync. **422 tests**,
+Public repo: https://github.com/PeterDaOne/school-sync. **483 tests**,
 green, gating CI. launchd loaded. **Both capture layers are now proven
 end to end AND proven running in the cloud** — Classroom on 2026-07-31,
 Gmail on 2026-08-01 (row `Count 1 to 10` created inside dispatch run
@@ -81,6 +81,41 @@ below) life categories: chore/birthday/tournament → `Personal`, with
 exactly one of `class_name`/`category` set every time. That closes what
 this file previously listed as the biggest unproven thing.
 
+## School starts 2026-08-07. What landed on 08-05, and what didn't
+
+**The OAuth expiry scare is over.** The refresh token was verified live —
+refresh returns 200 and all six scopes are intact, including both
+Classroom ones Google renames on grant. Publishing the consent screen to
+Production stopped the 7-day test-user fuse. **The empty scope list Peter
+saw in Cloud Console is the DECLARED list, which is a different object
+from an existing grant** — it only governs the *next* consent, i.e. the
+school-account switch. Check it before that, not before school. Re-verify
+the token on/after 08-08 to prove the fuse is really stopped.
+
+**The red GitHub runs are ~0.4% of runs, and the cause is still
+unknown.** 7 since 08-03; `test` always passes, `Run cloud sync` always
+fails, and the failing step takes 3–8s against 5–7s for a healthy run —
+so not a hang, not a startup crash, not auth. It needs the log text,
+which needs an admin login. **`notify.publish_failure` now makes the next
+one readable without one** (see below), so this should self-diagnose.
+
+Shipped:
+
+1. **Class hours** (`07:30–15:00 Mon–Fri`) — reminders that come due
+   while Peter is in class are **deferred**, not consumed. The opposite
+   disposition from quiet hours, deliberately, which is why it lives in
+   `pipeline._allocate` (owns "hold it") and not `due_for_reminder`
+   (owns "spend it"). Urgent announcements (priority ≥ 4) still pass.
+2. **The capture digest** — above 3 announcements in a pass they become
+   one grouped push. Measured through the real allocator: **32 items →
+   32 pushes over 20 minutes before, 1 push after.**
+3. **`CLASSROOM_LOOKBACK_HOURS` was 48 in production, not 168** — the
+   documented 07-31 widening never reached the workflow, and the
+   workflow is the only place `classroom_scan` runs. Fixed, and
+   `test_settings_parity.py` now compares **values, not just names**.
+4. **Cloud failures publish to an ntfy ops topic** (derived from
+   `NTFY_COMMAND_TOPIC`, no new secret), redacted and rate-limited.
+
 ## What is NOT proven
 
 - **The Gmail `Source Link` has not been clicked.** The URL shape is
@@ -94,6 +129,57 @@ this file previously listed as the biggest unproven thing.
 - **The classifier is non-deterministic.** The same email came back
   `Events` once and `Tasks` once across two runs. Both readings were
   defensible, but don't assume a verdict is stable.
+
+## The agenda, in order
+
+Phase 2 (this week):
+
+1. **`MIN_INTERVAL_HOURS` silently voids `DEADLINE_GUARANTEE_FRACTION`
+   below 6.06h remaining.** Confirmed: `interval_hours` ends with
+   `return max(hours, self.min_interval)`. Fix is ONE exception to the
+   2h floor, gated on `0 < hours_remaining <= 6`, so it cannot become a
+   general escape hatch.
+2. **Inert knobs need to say so at startup.** `TASK_FLOOR_HOURS` (1.0)
+   sits below `MIN_INTERVAL_HOURS` (2.0) and does nothing; High and
+   Medium priority are identical for a freshly overdue item. An inert
+   knob is worse than an absent one — you tune it in November, see no
+   change, and conclude the system is broken.
+3. **Classroom due-date reconciliation.** Confirmed absent: capture is
+   create-only (`if external_id in known_ids: continue`), so a teacher
+   moving Friday's essay to Monday leaves Notion, Calendar and every
+   reminder confidently and precisely wrong. Keep it NARROW — reconcile
+   the due date only, so a Classroom edit still can't stomp a title or
+   Status set by hand. Testable this week on the existing test course.
+4. **Auto-close on `TURNED_IN`.** The API read already happens every
+   sweep. **But it cannot be proven on the current test course**:
+   `studentSubmissions?userId=me` returns empty because Peter OWNS that
+   course, so Classroom creates no submission for him (verified live).
+   It ships untested until the school account. `SUBMITTED_STATES`
+   already includes `RETURNED`, so the "don't reopen graded work"
+   hazard is pre-handled — reuse that set. Add a `Completed By` field so
+   a self-closing row doesn't read as the database moving on its own.
+
+Phase 3 (after real data): `maxPoints` → stakes (confirmed free — live
+coursework returns `maxPoints: 100` inside the object already fetched);
+derived start-by dates ("start this tonight" beats "this is due soon");
+capture-coverage gap reporting, which genuinely needs a baseline that
+won't exist until ~2 weeks in.
+
+**Do NOT build:** a per-item effort field, an auto-scheduler, any learned
+or adaptive cadence, a second interface, grade prediction, or
+bidirectional Calendar sync. Each was considered and rejected on merit.
+
+## Two cadence bugs that were suspected and came back CLEAN
+
+Do not re-fix these; both were traced to the line.
+
+- **Jitter cannot break the deadline guarantee.** `interval_hours` runs
+  jitter → load scale → guarantee → `min_interval`. The guarantee is
+  applied *after* jitter.
+- **Quiet-hours silent consume does not burn daily budget.** `pipeline`
+  writes today's *real delivered count* (0 on a new day); it re-dates the
+  counter without incrementing it. Pinned by
+  `QuietHoursDoNotPoisonTheDailyBudget`.
 
 ## Open items
 

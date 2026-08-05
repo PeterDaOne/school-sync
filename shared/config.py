@@ -110,6 +110,52 @@ def flag(name: str, default: bool = False) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+# Settings whose VALUES must never be written anywhere public — a tracked
+# file (scan_secrets.py) or an unauthenticated ntfy topic
+# (notify.publish_failure). Everything else in .env is a non-secret knob.
+#
+# It lives here rather than in scan_secrets.py, which owned it first,
+# because it now has two consumers and this project has already been
+# bitten twice by one list living in several places. scan_secrets imports
+# it.
+#
+# SCHOOL_EMAIL_HINTS is not a credential but IS sensitive: on a public
+# repo it names the real school of a minor.
+SENSITIVE_KEYS = (
+    "NOTION_TOKEN",
+    "NOTION_DB_ID",
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REFRESH_TOKEN",
+    "GOOGLE_CALENDAR_ID",
+    "ANTHROPIC_API_KEY",
+    "NTFY_TOPIC",
+    "NTFY_COMMAND_TOPIC",
+    "SCHOOL_EMAIL_HINTS",
+)
+
+# Below this, a "secret" is too short to match meaningfully and would
+# redact or flag ordinary text.
+MIN_SECRET_LENGTH = 8
+
+
+def redact(text: str) -> str:
+    """
+    Replace every live secret VALUE in `text` with its name.
+
+    Used before any error text leaves the process for somewhere
+    unauthenticated. Notion surfaces 4xx response bodies in exception
+    messages (deliberately — a bare HTTPError is what made schema drift
+    undiagnosable), and Google's errors quote request URLs, so an
+    exception string is not automatically safe to publish.
+    """
+    for key in SENSITIVE_KEYS:
+        value = optional(key)
+        if value and len(value) >= MIN_SECRET_LENGTH:
+            text = text.replace(value, f"<{key}>")
+    return text
+
+
 def is_placeholder(value: str) -> bool:
     """
     True if a value is still an unfilled template value rather than a

@@ -117,6 +117,39 @@ DEFAULT_QUIET_START = "00:00"
 DEFAULT_QUIET_END = "05:00"
 DEFAULT_CLOUD_LAG_MINUTES = 5.0
 
+# CLASS HOURS (added 2026-08-05, the day before school starts).
+#
+# Quiet hours were the only window this system modelled, and they cover
+# the seven hours Peter is asleep. Nothing modelled the seven hours he is
+# in class -- phone away, unable to open Notion, unable to start
+# anything. Reminders fired freely into that window and, because
+# DAILY_NOTIFICATION_BUDGET is a true daily total, every one of them
+# SPENT budget the evening needed. The evening is when the work actually
+# happens.
+#
+# Worked example on the real defaults: an Assignment due Friday 23:59,
+# two days out, alpha 3.4 -> a ~6.8h interval, so reminders land near
+# 08:00, 15:00, 22:00. One of the three is delivered to a bag.
+#
+# THE DISPOSITION IS THE OPPOSITE OF QUIET HOURS, AND THE ASYMMETRY IS
+# THE WHOLE POINT. Quiet hours CONSUME the slot: nothing changes
+# overnight, and holding reminders caused a documented 05:00 burst.
+# Class hours DEFER: 15:00 is strictly better than 09:00 for the same
+# message, and the item's remaining time is materially unchanged, so
+# there is nothing to gain by spending the slot on an undeliverable
+# moment.
+#
+# Deferral is why this is NOT enforced here in due_for_reminder (which
+# owns "spend the slot") but in pipeline._allocate (which already owns
+# "hold it for later, Last Reminded untouched").
+DEFAULT_SCHOOL_HOURS_START = "07:30"
+DEFAULT_SCHOOL_HOURS_END = "15:00"
+DEFAULT_SCHOOL_DAYS = "Mon-Fri"
+
+_WEEKDAY_NAMES = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+}
+
 DEFAULT_ASSIGNMENT_ALPHA = 3.4      # hours/day -> ceiling (~48h) at ~14 days out
 DEFAULT_ASSIGNMENT_FLOOR = 2.0
 DEFAULT_ASSIGNMENT_CEILING = 48.0
@@ -227,6 +260,28 @@ DEFAULT_LOAD_SCALE_TARGET = 5
 # because the mechanism is interval stretch, not volume.
 DEFAULT_DEADLINE_GUARANTEE_FRACTION = 0.33
 
+# CAPTURE DIGEST (added 2026-08-05). More than this many announcements in
+# a single pass are collapsed into ONE grouped push instead of sent
+# individually. See shared/digest.py.
+#
+# Announcements are deliberately exempt from the daily budget -- correct,
+# because an item can only be captured once, so they are self-limiting.
+# But on the first day of a semester "self-limiting" is not a small
+# number: eight teachers post syllabi and first readings at once, the
+# sweep finds all of it, and the only remaining bound is
+# MAX_NOTIFICATIONS_PER_PASS at a two-minute dispatch cadence. Thirty new
+# items becomes thirty pushes across twenty minutes, during first period.
+#
+# That is the one failure on this system's list that is not silent, and
+# it lands in the week its credibility is set. A digest keeps every item
+# announced -- nothing is dropped or delayed to tomorrow -- while costing
+# one buzz instead of thirty.
+#
+# The threshold exists because a digest genuinely loses something: it
+# carries no per-item due date and no Mark-done button. At 1-3 new items
+# the individual pushes are better, so they are kept.
+DEFAULT_CAPTURE_DIGEST_THRESHOLD = 3
+
 
 # EVERY environment variable Cadence.from_env() reads, in one list.
 #
@@ -265,6 +320,10 @@ TUNABLE_ENV_VARS = (
     "MIN_INTERVAL_HOURS",
     "LOAD_SCALE_TARGET_ITEMS",
     "DEADLINE_GUARANTEE_FRACTION",
+    "SCHOOL_HOURS_START",
+    "SCHOOL_HOURS_END",
+    "SCHOOL_DAYS",
+    "CAPTURE_DIGEST_THRESHOLD",
 )
 
 
@@ -313,6 +372,46 @@ def _parse_days(raw: str, fallback: str, label: str) -> tuple[int, ...]:
         print(f"[reminders] {label} must be non-negative days (got {raw!r}), using {fallback}")
         return parse(fallback)
     return days
+
+
+def _parse_weekdays(raw: str, fallback: str, label: str) -> frozenset[int]:
+    """
+    Parse "Mon-Fri" or "Mon,Wed,Fri" into a set of Python weekday numbers
+    (Monday = 0, matching datetime.weekday()).
+
+    Ranges are supported because "Mon-Fri" is how a school week is
+    actually said, and forcing the long form invites a typo in the one
+    setting that decides whether Peter gets notified during class.
+
+    Falls back rather than raising, like every other parser here: a bad
+    value must not take the sync down, and — more importantly — must not
+    silently mean "every day is a school day", which would suppress
+    reminders all weekend.
+    """
+    def parse(text: str) -> frozenset[int]:
+        days: set[int] = set()
+        for token in text.split(","):
+            token = token.strip().lower()
+            if not token:
+                continue
+            if "-" in token:
+                start, _, end = token.partition("-")
+                a, b = _WEEKDAY_NAMES[start.strip()[:3]], _WEEKDAY_NAMES[end.strip()[:3]]
+                # Inclusive, and wraps: "Sat-Sun" and "Fri-Mon" both work.
+                days.update((a + offset) % 7 for offset in range((b - a) % 7 + 1))
+            else:
+                days.add(_WEEKDAY_NAMES[token[:3]])
+        return frozenset(days)
+
+    try:
+        parsed = parse(raw)
+    except KeyError:
+        print(f"[reminders] bad {label} value {raw!r}, using {fallback}")
+        return parse(fallback)
+    if not parsed:
+        print(f"[reminders] {label} named no days (got {raw!r}), using {fallback}")
+        return parse(fallback)
+    return parsed
 
 
 def _parse_int(raw: str, fallback: int, label: str) -> int:
@@ -381,6 +480,10 @@ class Cadence:
     load_scale: float = 1.0
     load_scale_target: int = DEFAULT_LOAD_SCALE_TARGET
     deadline_guarantee: float = DEFAULT_DEADLINE_GUARANTEE_FRACTION
+    school_start: dtime = dtime(7, 30)
+    school_end: dtime = dtime(15, 0)
+    school_days: frozenset = frozenset({0, 1, 2, 3, 4})
+    capture_digest_threshold: int = DEFAULT_CAPTURE_DIGEST_THRESHOLD
 
     @classmethod
     def from_env(cls) -> "Cadence":
@@ -495,6 +598,26 @@ class Cadence:
                 DEFAULT_DEADLINE_GUARANTEE_FRACTION,
                 "DEADLINE_GUARANTEE_FRACTION",
             ),
+            school_start=_parse_hhmm(
+                config.optional("SCHOOL_HOURS_START", DEFAULT_SCHOOL_HOURS_START),
+                DEFAULT_SCHOOL_HOURS_START,
+            ),
+            school_end=_parse_hhmm(
+                config.optional("SCHOOL_HOURS_END", DEFAULT_SCHOOL_HOURS_END),
+                DEFAULT_SCHOOL_HOURS_END,
+            ),
+            school_days=_parse_weekdays(
+                config.optional("SCHOOL_DAYS", DEFAULT_SCHOOL_DAYS),
+                DEFAULT_SCHOOL_DAYS,
+                "SCHOOL_DAYS",
+            ),
+            capture_digest_threshold=_parse_int(
+                config.optional(
+                    "CAPTURE_DIGEST_THRESHOLD", str(DEFAULT_CAPTURE_DIGEST_THRESHOLD)
+                ),
+                DEFAULT_CAPTURE_DIGEST_THRESHOLD,
+                "CAPTURE_DIGEST_THRESHOLD",
+            ),
         )
 
     def for_load(self, active_items: int) -> "Cadence":
@@ -513,6 +636,29 @@ class Cadence:
         if self.quiet_start <= self.quiet_end:
             return self.quiet_start <= t < self.quiet_end
         return t >= self.quiet_start or t < self.quiet_end  # wraps past midnight
+
+    def in_class_hours(self, moment: datetime) -> bool:
+        """
+        True when Peter is in class and cannot act on a notification.
+
+        Converted into the school timezone before reading the weekday or
+        the clock, unlike in_quiet_hours: callers pass timeutil.now()
+        which is already local, but this one also reads .weekday(), and a
+        UTC-framed moment late on a Friday evening is Saturday in UTC.
+        Getting that wrong would suppress a whole day of reminders.
+
+        An empty window (start == end) disables the feature, matching
+        quiet hours.
+        """
+        if self.school_start == self.school_end or not self.school_days:
+            return False
+        local = moment.astimezone(timeutil.school_tz())
+        if local.weekday() not in self.school_days:
+            return False
+        t = local.time()
+        if self.school_start <= self.school_end:
+            return self.school_start <= t < self.school_end
+        return t >= self.school_start or t < self.school_end
 
     def interval_hours(
         self, type_name: str, days_until: float, priority: str | None, page_id: str

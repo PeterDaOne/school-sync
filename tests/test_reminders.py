@@ -15,7 +15,7 @@ an approximation.
 
 import unittest
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, time as dtime, timedelta
 
 from tests.context import at
 
@@ -1125,3 +1125,119 @@ class HardMinimumInterval(unittest.TestCase):
                 at("2026-07-30T13:00"),
                 cadence=CADENCE,
             )
+
+
+class ClassHoursWindow(unittest.TestCase):
+    """
+    2026-08-05 is a Wednesday, 2026-08-08 a Saturday — used below so the
+    weekday cases read against real dates rather than magic numbers.
+    """
+
+    C = Cadence(school_start=dtime(7, 30), school_end=dtime(15, 0))
+
+    def test_inside_the_window_on_a_school_day(self):
+        self.assertTrue(self.C.in_class_hours(at("2026-08-05T09:00")))
+
+    def test_the_boundaries_are_start_inclusive_end_exclusive(self):
+        self.assertTrue(self.C.in_class_hours(at("2026-08-05T07:30")))
+        self.assertFalse(self.C.in_class_hours(at("2026-08-05T07:29")))
+        self.assertFalse(self.C.in_class_hours(at("2026-08-05T15:00")))
+        self.assertTrue(self.C.in_class_hours(at("2026-08-05T14:59")))
+
+    def test_the_evening_is_free(self):
+        """The window this feature exists to protect."""
+        self.assertFalse(self.C.in_class_hours(at("2026-08-05T19:00")))
+
+    def test_weekends_are_never_class_hours(self):
+        self.assertFalse(self.C.in_class_hours(at("2026-08-08T09:00")))  # Saturday
+        self.assertFalse(self.C.in_class_hours(at("2026-08-09T09:00")))  # Sunday
+
+    def test_an_empty_window_disables_it(self):
+        off = Cadence(school_start=dtime(0, 0), school_end=dtime(0, 0))
+        self.assertFalse(off.in_class_hours(at("2026-08-05T09:00")))
+
+    def test_no_school_days_disables_it(self):
+        off = Cadence(school_days=frozenset())
+        self.assertFalse(off.in_class_hours(at("2026-08-05T09:00")))
+
+    def test_a_utc_framed_moment_is_read_in_school_time(self):
+        """
+        Regression guard for the bug class this codebase has shipped
+        twice. in_class_hours reads .weekday(), and a Friday evening in
+        Mountain is already Saturday in UTC — reading the wrong frame
+        would silence a whole day of reminders.
+        """
+        from datetime import timezone
+
+        # 2026-08-08T02:00Z == Friday 2026-08-07 20:00 Mountain: a
+        # Friday, but outside school hours.
+        friday_evening = datetime(2026, 8, 8, 2, 0, tzinfo=timezone.utc)
+        self.assertFalse(self.C.in_class_hours(friday_evening))
+        # 2026-08-07T15:00Z == Friday 09:00 Mountain: in class.
+        friday_morning = datetime(2026, 8, 7, 15, 0, tzinfo=timezone.utc)
+        self.assertTrue(self.C.in_class_hours(friday_morning))
+
+    def test_quiet_hours_and_class_hours_are_independent(self):
+        """
+        Different windows, different dispositions. Overlapping them would
+        be a config error, not a crash — but neither may swallow the
+        other.
+        """
+        c = Cadence(
+            quiet_start=dtime(0, 0), quiet_end=dtime(5, 0),
+            school_start=dtime(7, 30), school_end=dtime(15, 0),
+        )
+        night = at("2026-08-05T02:00")
+        self.assertTrue(c.in_quiet_hours(night))
+        self.assertFalse(c.in_class_hours(night))
+        school = at("2026-08-05T09:00")
+        self.assertFalse(c.in_quiet_hours(school))
+        self.assertTrue(c.in_class_hours(school))
+
+
+class SchoolDaysParsing(unittest.TestCase):
+    def test_a_range(self):
+        self.assertEqual(
+            reminders._parse_weekdays("Mon-Fri", "Mon-Fri", "T"), frozenset({0, 1, 2, 3, 4})
+        )
+
+    def test_an_explicit_list(self):
+        self.assertEqual(
+            reminders._parse_weekdays("Mon,Wed,Fri", "Mon-Fri", "T"), frozenset({0, 2, 4})
+        )
+
+    def test_a_range_wraps_past_sunday(self):
+        self.assertEqual(
+            reminders._parse_weekdays("Fri-Mon", "Mon-Fri", "T"), frozenset({4, 5, 6, 0})
+        )
+
+    def test_case_and_long_names_are_accepted(self):
+        self.assertEqual(
+            reminders._parse_weekdays("MONDAY,tuesday", "Mon-Fri", "T"), frozenset({0, 1})
+        )
+
+    def test_a_single_day(self):
+        self.assertEqual(reminders._parse_weekdays("Sun", "Mon-Fri", "T"), frozenset({6}))
+
+    def test_garbage_falls_back_rather_than_raising(self):
+        """
+        A bad value must not take the sync down — and must NOT silently
+        mean "every day is a school day", which would suppress reminders
+        all weekend.
+        """
+        self.assertEqual(
+            reminders._parse_weekdays("Blursday", "Mon-Fri", "T"), frozenset({0, 1, 2, 3, 4})
+        )
+
+    def test_an_empty_value_falls_back(self):
+        self.assertEqual(
+            reminders._parse_weekdays("", "Mon-Fri", "T"), frozenset({0, 1, 2, 3, 4})
+        )
+
+    def test_the_shipped_default_is_a_five_day_school_week(self):
+        self.assertEqual(
+            reminders._parse_weekdays(
+                reminders.DEFAULT_SCHOOL_DAYS, reminders.DEFAULT_SCHOOL_DAYS, "T"
+            ),
+            frozenset({0, 1, 2, 3, 4}),
+        )
