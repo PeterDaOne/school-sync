@@ -111,16 +111,34 @@ def ops_topic() -> str | None:
     """
     The topic failed cloud runs report to, or None if unconfigured.
 
-    NTFY_ERROR_TOPIC wins if set; otherwise it is derived from
-    NTFY_COMMAND_TOPIC. Deriving it means this works with no new secret
-    in no new places — which matters, because the failure it exists to
-    surface is one nobody can currently see.
+    Tried in order: NTFY_ERROR_TOPIC, then NTFY_COMMAND_TOPIC, then
+    NTFY_TOPIC — each with the "-ops" suffix, so none of them is ever
+    the topic itself. Deriving rather than requiring a new secret is the
+    point: the failure this exists to surface is one nobody can see, so
+    a reporter that needs setup before it works is a reporter that isn't
+    working when you need it.
+
+    THE NTFY_TOPIC FALLBACK IS NOT BELT-AND-BRACES, IT IS THE ONE THAT
+    ACTUALLY FIRES. NTFY_COMMAND_TOPIC was deliberately never added as a
+    GitHub secret (the Mark-done button is Mac-only by choice), so in the
+    cloud — the ONLY place cloud_sync runs — this returned None and
+    publish_failure was a silent no-op. It shipped 2026-08-05 and sat
+    inert through 36 failed runs the next day, which is exactly the
+    class of bug it was written to catch. NTFY_TOPIC is required in the
+    cloud (the workflow fails fast without it), so deriving from it means
+    the reporter cannot be silently unconfigured.
+
+    Note the suffix keeps this off NTFY_TOPIC itself, which Peter's phone
+    IS subscribed to — error text must never reach it.
     """
     explicit = config.optional("NTFY_ERROR_TOPIC")
     if explicit:
         return explicit
-    command = config.optional("NTFY_COMMAND_TOPIC")
-    return f"{command}{OPS_TOPIC_SUFFIX}" if command else None
+    for name in ("NTFY_COMMAND_TOPIC", "NTFY_TOPIC"):
+        base = config.optional(name)
+        if base:
+            return f"{base}{OPS_TOPIC_SUFFIX}"
+    return None
 
 
 def _already_reported(url: str, window: str) -> bool:

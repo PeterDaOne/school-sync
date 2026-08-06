@@ -36,8 +36,10 @@ class OpsTopicResolution(unittest.TestCase):
             self.assertEqual(notify.ops_topic(), "ops-xyz")
 
     def test_unconfigured_is_none_not_an_error(self):
+        """Only when NO topic of any kind is set — see TheFallbackChain."""
         with mock.patch.dict(
-            os.environ, {"NTFY_COMMAND_TOPIC": "", "NTFY_ERROR_TOPIC": ""}
+            os.environ,
+            {"NTFY_COMMAND_TOPIC": "", "NTFY_ERROR_TOPIC": "", "NTFY_TOPIC": ""},
         ):
             self.assertIsNone(notify.ops_topic())
 
@@ -93,7 +95,15 @@ class PublishFailure(unittest.TestCase):
         with (
             mock.patch.dict(
                 os.environ,
-                {"NTFY_COMMAND_TOPIC": topic, "NTFY_ERROR_TOPIC": "", "NTFY_SERVER": ""},
+                {
+                    "NTFY_COMMAND_TOPIC": topic,
+                    "NTFY_ERROR_TOPIC": "",
+                    "NTFY_SERVER": "",
+                    # Blanked so `topic=""` really means "nothing
+                    # configured" rather than falling back to the main
+                    # topic, which is the production default.
+                    "NTFY_TOPIC": "",
+                },
             ),
             mock.patch.object(notify, "_already_reported", return_value=already),
             mock.patch.object(notify, "requests") as rq,
@@ -141,6 +151,46 @@ class PublishFailure(unittest.TestCase):
     def test_it_does_not_buzz(self):
         _, rq = self._publish("gmail_scan: 500")
         self.assertEqual(rq.post.call_args.kwargs["headers"]["Priority"], "1")
+
+
+
+class TheFallbackChain(unittest.TestCase):
+    """
+    Regression guard for the reason this feature was inert on the day it
+    shipped: NTFY_COMMAND_TOPIC is deliberately not a GitHub secret, so
+    in the cloud — the only place cloud_sync runs — ops_topic() returned
+    None and publish_failure silently did nothing through 36 failed runs.
+    """
+
+    def test_falls_back_to_the_main_topic_when_the_command_topic_is_absent(self):
+        with mock.patch.dict(
+            os.environ,
+            {"NTFY_ERROR_TOPIC": "", "NTFY_COMMAND_TOPIC": "", "NTFY_TOPIC": "main-abc"},
+        ):
+            self.assertEqual(notify.ops_topic(), "main-abc" + notify.OPS_TOPIC_SUFFIX)
+
+    def test_it_is_never_the_main_topic_itself(self):
+        """Peter's phone IS subscribed to NTFY_TOPIC. Error text must
+        never land there."""
+        with mock.patch.dict(
+            os.environ,
+            {"NTFY_ERROR_TOPIC": "", "NTFY_COMMAND_TOPIC": "", "NTFY_TOPIC": "main-abc"},
+        ):
+            self.assertNotEqual(notify.ops_topic(), "main-abc")
+
+    def test_the_command_topic_still_wins_over_the_main_topic(self):
+        with mock.patch.dict(
+            os.environ,
+            {"NTFY_ERROR_TOPIC": "", "NTFY_COMMAND_TOPIC": "cmd", "NTFY_TOPIC": "main"},
+        ):
+            self.assertEqual(notify.ops_topic(), "cmd" + notify.OPS_TOPIC_SUFFIX)
+
+    def test_only_a_total_absence_of_topics_disables_it(self):
+        with mock.patch.dict(
+            os.environ,
+            {"NTFY_ERROR_TOPIC": "", "NTFY_COMMAND_TOPIC": "", "NTFY_TOPIC": ""},
+        ):
+            self.assertIsNone(notify.ops_topic())
 
 
 if __name__ == "__main__":
